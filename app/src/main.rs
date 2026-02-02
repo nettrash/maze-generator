@@ -29,7 +29,8 @@ struct Args {
     height: Option<u64>,
 
     /// Algorithm to use for maze generation
-    #[arg(long, default_value = "basic")]
+    /// Options: backtracking, prim, kruskal, aldous_broder, wilson, eller
+    #[arg(long, default_value = "backtracking")]
     algorithm: Option<String>,
 }
 
@@ -48,7 +49,7 @@ pub async fn main() -> Result<(), Error> {
             let generator = generator::Generator::new(
                 args.width.unwrap_or(100),
                 args.height.unwrap_or(100),
-                args.algorithm.as_deref().unwrap_or("basic"),
+                args.algorithm.as_deref().unwrap_or("backtracking"),
             );
             generator.generate().await?;
         }
