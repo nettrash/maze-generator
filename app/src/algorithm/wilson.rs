@@ -1,4 +1,4 @@
-use crate::maze::{
+use crate::{
     algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
     map::{Direction, Map},
     rng::Rng,
@@ -103,7 +103,7 @@ impl AlgorithmAbstraction for WilsonAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::WilsonAlgorithm;
-    use crate::maze::algorithm::abstraction::AlgorithmAbstraction;
+    use crate::algorithm::abstraction::AlgorithmAbstraction;
 
     #[test]
     fn generates_a_perfect_maze() {

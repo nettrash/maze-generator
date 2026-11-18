@@ -1,4 +1,4 @@
-use crate::maze::{
+use crate::{
     algorithm::{
         abstraction::AlgorithmAbstraction, aldous_broder::AldousBroderAlgorithm,
         backtracking::BacktrackingAlgorithm, eller::EllerAlgorithm, kruskal::KruskalAlgorithm,

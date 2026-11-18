@@ -1,4 +1,4 @@
-use crate::maze::{
+use crate::{
     algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
     map::Map,
     rng::Rng,
@@ -80,7 +80,7 @@ impl AlgorithmAbstraction for AldousBroderAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::AldousBroderAlgorithm;
-    use crate::maze::algorithm::abstraction::AlgorithmAbstraction;
+    use crate::algorithm::abstraction::AlgorithmAbstraction;
 
     #[test]
     fn generates_a_perfect_maze() {

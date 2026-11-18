@@ -2,10 +2,8 @@ use chrono::Datelike;
 use clap::{CommandFactory, Parser};
 use std::io::Error;
 
-use crate::maze::generator;
-use crate::maze::map::Map;
-
-pub mod maze;
+use maze::generator::Generator;
+use maze::map::Map;
 
 // Command line arguments.
 #[derive(Parser, Debug)]
@@ -55,7 +53,7 @@ pub async fn main() -> Result<(), Error> {
     match args.command.as_deref() {
         Some("generate") => {
             intro();
-            let generator = generator::Generator::new(
+            let generator = Generator::new(
                 args.width.unwrap_or(100),
                 args.height.unwrap_or(100),
                 args.algorithm.as_deref().unwrap_or("backtracking"),

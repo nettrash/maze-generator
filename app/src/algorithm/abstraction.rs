@@ -1,4 +1,4 @@
-use crate::maze::{algorithm::types::AlgorithmType, map::Map};
+use crate::{algorithm::types::AlgorithmType, map::Map};
 
 /// Defines the abstraction for maze generation algorithms.
 pub trait AlgorithmAbstraction {

@@ -4,6 +4,10 @@ version = "0.0.1"
 edition = "2024"
 license = "MIT"
 
+[lib]
+name = "maze"
+path = "src/lib.rs"
+
 [[bin]]
 name = "maze"
 path = "src/main.rs"

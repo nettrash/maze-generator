@@ -1,4 +1,4 @@
-use crate::maze::{
+use crate::{
     algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
     map::{Direction, Map},
     rng::Rng,
@@ -79,7 +79,7 @@ impl AlgorithmAbstraction for PrimAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::PrimAlgorithm;
-    use crate::maze::algorithm::abstraction::AlgorithmAbstraction;
+    use crate::algorithm::abstraction::AlgorithmAbstraction;
 
     #[test]
     fn generates_a_perfect_maze() {
