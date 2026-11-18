@@ -19,20 +19,32 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
+    - name: Read the pinned toolchain
+      # rust-toolchain.toml at the repository root is the single source of
+      # truth: cargo picks the same version locally through rustup, and CI
+      # installs exactly what it says. Bumping the version means editing one
+      # file, and the two can no longer drift apart.
+      id: pinned
+      run: >-
+        echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p'
+        "${{ github.workspace }}/rust-toolchain.toml")" >> "$GITHUB_OUTPUT"
+
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@master
       with:
-        toolchain: 1.88.0
+        toolchain: ${{ steps.pinned.outputs.channel }}
         components: rustfmt, clippy
-    
+
     - name: Check format
       run: 
         cd ${{ github.workspace }}/app ;
           cargo fmt -- --check
     - name: Check clippy
+      # -D warnings so a new lint fails the build here rather than quietly
+      # waiting for the next toolchain bump to turn it into an error.
       run: 
         cd ${{ github.workspace }}/app ;
-          cargo clippy --all-targets --all-features
+          cargo clippy --all-targets --all-features -- -D warnings
     - name: Build
       run: 
         cd ${{ github.workspace }}/app ;

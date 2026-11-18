@@ -1,4 +1,10 @@
 Unreleased
+            - Quality
+              * The Rust toolchain is pinned in rust-toolchain.toml, so a local
+                build and CI use the same compiler version and cannot drift
+                apart.
+              * Clippy runs with `-D warnings`, so a new lint fails the build
+                instead of passing quietly until the next toolchain bump.
             - Performance
               * The grid is stored as one flat row-major allocation instead of
                 a vector of rows, so reading a cell is a single index.

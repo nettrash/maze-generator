@@ -11,6 +11,11 @@ Build the binary from the `app` directory:
 cd app && cargo build --release   # target/release/maze
 ```
 
+`rust-toolchain.toml` at the repository root pins the Rust version, so `rustup`
+installs and selects it on the first build and you do not have to pick a
+toolchain yourself. CI reads the same file, so what you see locally is what CI
+checks.
+
 Or pull the published image, which is built for `linux/amd64` and
 `linux/arm64`:
 
