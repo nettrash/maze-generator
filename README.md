@@ -3,6 +3,21 @@
 Just for fun. This tool can generate the random maze by different algorythms.
 Each maze has only one path from left top corner to the right bottom corner.
 
+## Install
+
+Build the binary from the `app` directory:
+
+```sh
+cd app && cargo build --release   # target/release/maze
+```
+
+Or pull the published image, which is built for `linux/amd64` and
+`linux/arm64`:
+
+```sh
+docker run --rm nettrash/maze:0.0.1 maze --command generate --width 20 --height 10
+```
+
 ## Usage
 
 ```sh
