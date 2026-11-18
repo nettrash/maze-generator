@@ -1,6 +1,6 @@
 use chrono::Datelike;
 use clap::{CommandFactory, Parser};
-use std::io::Error;
+use std::process::ExitCode;
 
 use maze::generator::Generator;
 use maze::map::Map;
@@ -42,14 +42,24 @@ struct Args {
 }
 
 #[tokio::main]
-pub async fn main() -> Result<(), Error> {
+pub async fn main() -> ExitCode {
     let args = Args::parse();
     if args.command.is_none() {
         let mut cmd = Args::command();
         let _ = cmd.print_help();
-        return Ok(());
+        return ExitCode::SUCCESS;
     }
 
+    match run(&args).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(args: &Args) -> Result<(), maze::MazeError> {
     match args.command.as_deref() {
         Some("generate") => {
             intro();
@@ -57,7 +67,7 @@ pub async fn main() -> Result<(), Error> {
                 args.width.unwrap_or(100),
                 args.height.unwrap_or(100),
                 args.algorithm.as_deref().unwrap_or("backtracking"),
-            );
+            )?;
             let map = generator.generate().await?;
             match args.output.as_deref() {
                 Some(path) => {
@@ -70,8 +80,7 @@ pub async fn main() -> Result<(), Error> {
         Some("check") => {
             intro();
             let Some(path) = args.input.as_deref() else {
-                println!("The check command needs an --input file.");
-                return Ok(());
+                return Err(input_error("the check command needs an --input file"));
             };
             let map = Map::load_from_file(path)?;
             println!("Loaded a {}x{} maze from {path}", map.width(), map.height());
@@ -82,11 +91,21 @@ pub async fn main() -> Result<(), Error> {
             intro();
             print!("Solving maze... ");
         }
-        _ => {
-            println!("Unknown command: {:?}", args.command);
+        other => {
+            let name = other.unwrap_or("<missing>");
+            return Err(input_error(format!("unknown command: {name}")));
         }
     }
     Ok(())
+}
+
+/// Builds the error used for bad command line usage, so the process exits with
+/// a failure status and a message on stderr rather than a panic.
+fn input_error(message: impl Into<String>) -> maze::MazeError {
+    maze::MazeError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        message.into(),
+    ))
 }
 
 fn intro() {

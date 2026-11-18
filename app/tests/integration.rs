@@ -1,21 +1,12 @@
 //! End-to-end tests that exercise the crate the way a consumer would, through
 //! the public API only.
 
-use maze::{AlgorithmType, Direction, Generator, Map, Rng};
-
-const ALGORITHMS: [&str; 6] = [
-    "backtracking",
-    "prim",
-    "kruskal",
-    "aldous_broder",
-    "wilson",
-    "eller",
-];
+use maze::{ALGORITHMS, AlgorithmType, Direction, Generator, Map, MazeError, Rng};
 
 #[tokio::test]
 async fn every_algorithm_builds_a_perfect_solvable_maze() {
     for name in ALGORITHMS {
-        let generator = Generator::new(11, 7, name);
+        let generator = Generator::new(11, 7, name).expect("known algorithm");
         let map = generator.generate().await.expect("generation failed");
         assert_eq!(map.width(), 11, "{name} width");
         assert_eq!(map.height(), 7, "{name} height");
@@ -31,7 +22,11 @@ async fn generated_mazes_survive_a_save_and_load_round_trip() {
 
     for name in ALGORITHMS {
         let path = dir.join(format!("{name}.maze"));
-        let original = Generator::new(9, 6, name).generate().await.unwrap();
+        let original = Generator::new(9, 6, name)
+            .expect("known algorithm")
+            .generate()
+            .await
+            .unwrap();
         original.save_to_file(&path).unwrap();
 
         let loaded = Map::load_from_file(&path).unwrap();
@@ -66,6 +61,20 @@ fn rng_is_reproducible_from_a_seed() {
     let a: Vec<u64> = (0..20).map(|_| Rng::new(42).below(1000)).collect();
     let b: Vec<u64> = (0..20).map(|_| Rng::new(42).below(1000)).collect();
     assert_eq!(a, b);
+}
+
+#[test]
+fn an_unknown_algorithm_reports_the_valid_choices() {
+    let error = Generator::new(4, 4, "depth-first")
+        .err()
+        .expect("an unknown algorithm must be rejected");
+    assert!(matches!(error, MazeError::UnsupportedAlgorithm { .. }));
+
+    let message = error.to_string();
+    assert!(message.contains("depth-first"), "{message}");
+    for name in ALGORITHMS {
+        assert!(message.contains(name), "{message} should mention {name}");
+    }
 }
 
 #[test]
