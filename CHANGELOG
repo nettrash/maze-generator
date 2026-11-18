@@ -1,3 +1,14 @@
+Unreleased
+            - Performance
+              * The grid is stored as one flat row-major allocation instead of
+                a vector of rows, so reading a cell is a single index.
+              * Walking a cell's neighbours no longer allocates: it fills a
+                fixed-size array, which is what every generation algorithm
+                does at every step.
+              * Verifying and solving a maze index a flat table by cell rather
+                than hashing coordinates, which is about nine times faster.
+              * The `check` command counts dead ends directly instead of
+                building the list to take its length.
 v0.0.1 - 2026-11-18
             - First release.
             - Features

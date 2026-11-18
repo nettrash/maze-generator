@@ -73,7 +73,7 @@ impl AlgorithmAbstraction for PrimAlgorithm {
         let mut frontier: Vec<(usize, usize, Direction)> = Vec::new();
         let start = (rng.below(width) as usize, rng.below(height) as usize);
         in_maze[start.1][start.0] = true;
-        frontier.extend(map.neighbors(start.0, start.1));
+        frontier.extend(map.each_neighbor(start.0, start.1));
 
         while !frontier.is_empty() {
             let index = rng.below(frontier.len() as u64) as usize;
@@ -83,7 +83,7 @@ impl AlgorithmAbstraction for PrimAlgorithm {
             }
             map.carve(nx, ny, direction.opposite());
             in_maze[ny][nx] = true;
-            frontier.extend(map.neighbors(nx, ny));
+            frontier.extend(map.each_neighbor(nx, ny));
         }
         map
     }

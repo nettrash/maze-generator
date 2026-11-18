@@ -1,6 +1,6 @@
 use crate::{
     algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
-    map::Map,
+    map::{Direction, Map},
     rng::{Rng, random_seed},
 };
 
@@ -61,24 +61,31 @@ impl AlgorithmAbstraction for BacktrackingAlgorithm {
             return map;
         }
         let mut rng = self.rng();
+        let w = width as usize;
+        let cells = (width * height) as usize;
         let mut stack = vec![(0usize, 0usize)];
-        let mut visited = vec![vec![false; width as usize]; height as usize];
-        visited[0][0] = true;
+        let mut visited = vec![false; cells];
+        visited[0] = true;
 
         while let Some((x, y)) = stack.last().copied() {
-            let unvisited: Vec<_> = map
-                .neighbors(x, y)
-                .into_iter()
-                .filter(|&(nx, ny, _)| !visited[ny][nx])
-                .collect();
+            // At most four neighbours exist, so the unvisited ones fit in a
+            // fixed array; allocating a Vec here would run once per step.
+            let mut unvisited: [(usize, usize, Direction); 4] = [(0, 0, Direction::North); 4];
+            let mut count = 0;
+            for (nx, ny, direction) in map.each_neighbor(x, y) {
+                if !visited[ny * w + nx] {
+                    unvisited[count] = (nx, ny, direction);
+                    count += 1;
+                }
+            }
 
-            if unvisited.is_empty() {
+            if count == 0 {
                 stack.pop();
                 continue;
             }
-            let (nx, ny, direction) = unvisited[rng.below(unvisited.len() as u64) as usize];
+            let (nx, ny, direction) = unvisited[rng.below(count as u64) as usize];
             map.carve(x, y, direction);
-            visited[ny][nx] = true;
+            visited[ny * w + nx] = true;
             stack.push((nx, ny));
         }
         map

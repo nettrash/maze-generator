@@ -136,6 +136,11 @@ fn map_operations(c: &mut Criterion) {
         b.iter(|| black_box(map.dead_ends()).len());
     });
 
+    // What `check` actually asks for: the number, without the list.
+    group.bench_function("dead_end_count", |b| {
+        b.iter(|| black_box(map.dead_end_count()));
+    });
+
     // The whole-grid walk is what the algorithms themselves do, so it is the
     // version worth watching for a stray allocation.
     group.bench_function("neighbors over every cell", |b| {
@@ -143,7 +148,33 @@ fn map_operations(c: &mut Criterion) {
             let mut total = 0usize;
             for y in 0..height as usize {
                 for x in 0..width as usize {
-                    total += map.neighbors(x, y).len();
+                    total += map.neighbors(x, y).iter().filter(|n| n.is_some()).count();
+                }
+            }
+            black_box(total)
+        });
+    });
+
+    // The random-walk algorithms ask how many neighbours there are and then
+    // index one, which is the cheaper path and must stay that way.
+    group.bench_function("neighbor_count over every cell", |b| {
+        b.iter(|| {
+            let mut total = 0usize;
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    total += map.neighbor_count(x, y);
+                }
+            }
+            black_box(total)
+        });
+    });
+
+    group.bench_function("each_neighbor over every cell", |b| {
+        b.iter(|| {
+            let mut total = 0usize;
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    total += map.each_neighbor(x, y).count();
                 }
             }
             black_box(total)
