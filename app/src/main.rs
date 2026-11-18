@@ -32,6 +32,13 @@ struct Args {
     #[arg(long, default_value = "backtracking")]
     algorithm: Option<String>,
 
+    /// Seed for the random number generator
+    /// Give the same seed to reproduce the same maze; omit it for a new maze
+    /// every run. The seed actually used is always reported, so a maze worth
+    /// keeping can be regenerated.
+    #[arg(long)]
+    seed: Option<u64>,
+
     /// File to save the generated maze to
     #[arg(long)]
     output: Option<String>,
@@ -67,6 +74,7 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
                 args.width.unwrap_or(100),
                 args.height.unwrap_or(100),
                 args.algorithm.as_deref().unwrap_or("backtracking"),
+                args.seed,
             )?;
             let map = generator.generate().await?;
             match args.output.as_deref() {
@@ -89,7 +97,23 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
         }
         Some("solve") => {
             intro();
-            print!("Solving maze... ");
+            let Some(path) = args.input.as_deref() else {
+                return Err(input_error("the solve command needs an --input file"));
+            };
+            let map = Map::load_from_file(path)?;
+            println!("Loaded a {}x{} maze from {path}", map.width(), map.height());
+            match map.solve() {
+                Some(route) => {
+                    println!("{}", map.to_ascii_with_path(&route));
+                    // A route of n cells is walked in n - 1 steps.
+                    println!("Solved in {} steps.", route.len() - 1);
+                }
+                None => {
+                    println!("{}", map.to_ascii());
+                    println!("No solution: the exit cannot be reached from the entrance.");
+                    return Err(input_error("the maze has no solution"));
+                }
+            }
         }
         other => {
             let name = other.unwrap_or("<missing>");
