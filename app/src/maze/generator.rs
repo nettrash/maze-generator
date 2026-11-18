@@ -45,8 +45,72 @@ impl Generator {
             self.height,
             self.algorithm.get_algorithm_type().as_string()
         );
-        // Maze generation logic would go here
         let map = self.algorithm.generate_maze(self.width, self.height);
         Ok(map)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Generator;
+
+    /// Every algorithm must return a perfect, solvable maze of the requested
+    /// size, including the degenerate one-cell and single-row shapes.
+    #[tokio::test]
+    async fn all_algorithms_generate_perfect_mazes() {
+        let algorithms = [
+            "backtracking",
+            "prim",
+            "kruskal",
+            "aldous_broder",
+            "wilson",
+            "eller",
+        ];
+        let sizes = [(1u64, 1u64), (1, 7), (6, 1), (9, 6), (12, 10)];
+
+        for name in algorithms {
+            for (width, height) in sizes {
+                let generator = Generator::new(width, height, name);
+                let map = generator
+                    .generate()
+                    .await
+                    .expect("generation should not fail");
+                assert_eq!(map.width(), width, "{name} width at {width}x{height}");
+                assert_eq!(map.height(), height, "{name} height at {width}x{height}");
+                assert!(
+                    map.is_perfect(),
+                    "{name} did not produce a perfect maze at {width}x{height}"
+                );
+                assert!(
+                    map.is_solvable(),
+                    "{name} produced an unsolvable maze at {width}x{height}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dispatches_the_requested_algorithm() {
+        let cases = [
+            ("backtracking", "backtracking"),
+            ("prim", "prim"),
+            ("kruskal", "kruskal"),
+            ("aldous_broder", "aldous_broder"),
+            ("wilson", "wilson"),
+            ("eller", "eller"),
+        ];
+        for (name, expected) in cases {
+            let generator = Generator::new(3, 3, name);
+            assert_eq!(
+                generator.algorithm.get_algorithm_type().as_string(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Unsupported algorithm")]
+    fn rejects_an_unknown_algorithm() {
+        Generator::new(3, 3, "not-an-algorithm");
     }
 }
