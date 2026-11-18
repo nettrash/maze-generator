@@ -1,4 +1,5 @@
-v0.0.1
+v0.0.1 - 2026-11-18
+            - First release.
             - Features
               * Maze Generation with Backtracking Algorithm.
               * Maze Generation with Prim's Algorithm.
@@ -6,3 +7,23 @@ v0.0.1
               * Maze Generation with Aldous-Broder Algorithm.
               * Maze Generation with Wilson's Algorithm.
               * Maze Generation with Eller's Algorithm.
+              * In-memory maze structure with a lossless, versioned text file
+                format, so a saved maze loads back exactly as it was written.
+              * A library and a command line binary split apart, so the maze
+                can be used as a crate as well as from the shell.
+              * `generate`, `check` and `solve` commands.
+              * Solver that draws the route from the top-left corner to the
+                bottom-right corner onto the maze.
+              * Reproducible generation through `--seed`, with the seed used
+                always reported.
+              * SVG export for printing and sharing.
+              * Braided mazes (`--braid`) and entrance/exit openings
+                (`--entrance-exit`).
+            - Quality
+              * Unit, integration and property-based tests; the property tests
+                check every algorithm at random sizes including the degenerate
+                1x1, 1xN and Nx1 shapes.
+              * Criterion benchmarks for generation, the variants, the map hot
+                paths and file I/O.
+              * Continuous integration runs format, clippy, build and test.
+              * Docker image published for `nettrash/maze`.
