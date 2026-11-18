@@ -156,8 +156,13 @@ impl Direction {
 pub struct Map {
     width: usize,
     height: usize,
-    /// `grid[y][x]` holds the wall bitmask of the cell at column `x`, row `y`.
-    grid: Vec<Vec<u8>>,
+    /// Row-major wall bitmasks: `grid[y * width + x]` holds the walls of the
+    /// cell at column `x`, row `y`.
+    ///
+    /// One flat allocation rather than one `Vec` per row, so walking the maze
+    /// in reading order stays cache friendly and every cell access is a single
+    /// bounds check instead of two.
+    grid: Vec<u8>,
 }
 
 impl Map {
@@ -171,7 +176,7 @@ impl Map {
         Map {
             width,
             height,
-            grid: vec![vec![WALLS_ALL; width]; height],
+            grid: vec![WALLS_ALL; Self::cells(width, height)],
         }
     }
 
@@ -184,8 +189,17 @@ impl Map {
         Map {
             width,
             height,
-            grid: vec![vec![0; width]; height],
+            grid: vec![0; Self::cells(width, height)],
         }
+    }
+
+    /// The length of the flat grid for a maze of this size.
+    ///
+    /// Saturating rather than wrapping: an absurd `width * height` should fail
+    /// loudly when the grid is allocated, not wrap to a small length that every
+    /// later cell access would panic on.
+    fn cells(width: usize, height: usize) -> usize {
+        width.saturating_mul(height)
     }
 
     /// The width of the maze in cells.
@@ -204,11 +218,11 @@ impl Map {
     }
 
     fn cell(&self, x: usize, y: usize) -> u8 {
-        self.grid[y][x]
+        self.grid[y * self.width + x]
     }
 
     fn cell_mut(&mut self, x: usize, y: usize) -> &mut u8 {
-        &mut self.grid[y][x]
+        &mut self.grid[y * self.width + x]
     }
 
     /// Whether the given coordinates fall inside the maze.
