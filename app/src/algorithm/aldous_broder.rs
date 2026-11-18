@@ -74,8 +74,9 @@ impl AlgorithmAbstraction for AldousBroderAlgorithm {
         remaining -= 1;
 
         while remaining > 0 {
-            let neighbors = map.neighbors(current.0, current.1);
-            let (nx, ny, direction) = neighbors[rng.below(neighbors.len() as u64) as usize];
+            let count = map.neighbor_count(current.0, current.1);
+            let (nx, ny, direction) =
+                map.neighbor_at(current.0, current.1, rng.below(count as u64) as usize);
             let index = ny * width as usize + nx;
             if !visited[index] {
                 // Only the step that first reaches a cell opens a wall, which

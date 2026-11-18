@@ -45,6 +45,21 @@
 //! a version 1 file with a hole in its outer border is rejected. Newly written
 //! files use version 2.
 //!
+//! # Neighbours
+//!
+//! Three ways to walk a cell's neighbours, chosen by what the caller needs:
+//!
+//! - [`Map::each_neighbor`] iterates all of them, which is what the graph walks
+//!   in [`Map::is_perfect`] and [`Map::solve`] do.
+//! - [`Map::neighbor_count`] with [`Map::neighbor_at`] picks one at random
+//!   without building anything, which is what the random-walk algorithms do.
+//! - [`Map::neighbors`] hands back the packed array itself.
+//!
+//! All three agree, are allocation free, and count neighbours by position
+//! rather than by walls: a cell keeps its neighbours whether or not the wall
+//! between them still stands, since carving towards a walled neighbour is the
+//! whole point of asking.
+//!
 //! # Solving
 //!
 //! [`Map::solve`] returns the unique route from the top-left corner to the
@@ -255,17 +270,83 @@ impl Map {
 
     /// The in-bounds neighbours of a cell together with the wall that separates
     /// them, used by the generation algorithms to pick where to carve next.
-    pub fn neighbors(&self, x: usize, y: usize) -> Vec<(usize, usize, Direction)> {
-        let mut result = Vec::with_capacity(4);
+    ///
+    /// The entries are packed at the front of the array and the rest are
+    /// `None`, so [`Map::neighbor_count`] says how many are usable and the
+    /// array can be indexed directly up to that count. It is a fixed array
+    /// rather than a `Vec` because this is the hottest call in every algorithm:
+    /// each of them asks for the neighbours of every cell it touches, and
+    /// allocating a `Vec` each time showed up in the benchmarks.
+    ///
+    /// A cell on the border simply has fewer entries; a cell outside the maze
+    /// has none.
+    pub fn neighbors(&self, x: usize, y: usize) -> [Option<(usize, usize, Direction)>; 4] {
+        let mut result = [None; 4];
         if x >= self.width || y >= self.height {
             return result;
         }
+        let mut index = 0;
         for direction in Direction::ALL {
             if let Some(neighbor) = self.neighbor(x, y, direction) {
-                result.push((neighbor.0, neighbor.1, direction));
+                result[index] = Some((neighbor.0, neighbor.1, direction));
+                index += 1;
             }
         }
         result
+    }
+
+    /// How many neighbours a cell has, which is four everywhere but on the
+    /// border.
+    ///
+    /// Cheaper than counting the entries of [`Map::neighbors`] because it only
+    /// looks at the position, never at the walls. Algorithms that want to pick
+    /// a neighbour at random ask for this and then index the array.
+    pub fn neighbor_count(&self, x: usize, y: usize) -> usize {
+        if x >= self.width || y >= self.height {
+            return 0;
+        }
+        let mut count = 0;
+        if y > 0 {
+            count += 1;
+        }
+        if x + 1 < self.width {
+            count += 1;
+        }
+        if y + 1 < self.height {
+            count += 1;
+        }
+        if x > 0 {
+            count += 1;
+        }
+        count
+    }
+
+    /// The `index`th neighbour of a cell, as returned by [`Map::neighbors`].
+    ///
+    /// `index` must be below [`Map::neighbor_count`]; the entries are packed at
+    /// the front of the array, so this is the indexed form the random-walk
+    /// algorithms want.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` is not below [`Map::neighbor_count`].
+    pub fn neighbor_at(&self, x: usize, y: usize, index: usize) -> (usize, usize, Direction) {
+        self.neighbors(x, y)[index].expect("index within neighbor_count")
+    }
+
+    /// Iterates over every neighbour of a cell together with the wall that
+    /// separates them.
+    ///
+    /// This is the convenient form when all neighbours are wanted, as the graph
+    /// walks in [`Map::is_perfect`] and [`Map::solve`] do. To pick one at random
+    /// without touching the walls, use [`Map::neighbor_count`] with
+    /// [`Map::neighbor_at`]. A cell outside the maze yields nothing.
+    pub fn each_neighbor(
+        &self,
+        x: usize,
+        y: usize,
+    ) -> impl Iterator<Item = (usize, usize, Direction)> {
+        self.neighbors(x, y).into_iter().flatten()
     }
 
     /// Removes the wall between a cell and its neighbour, returning whether the
@@ -414,7 +495,7 @@ impl Map {
         seen.insert((0, 0));
         queue.push_back((0, 0));
         while let Some((x, y)) = queue.pop_front() {
-            for (nx, ny, direction) in self.neighbors(x, y) {
+            for (nx, ny, direction) in self.each_neighbor(x, y) {
                 if self.has_wall(x, y, direction) {
                     continue;
                 }
@@ -654,7 +735,7 @@ impl Map {
         queue.push_back(start);
 
         while let Some((x, y)) = queue.pop_front() {
-            for (nx, ny, direction) in self.neighbors(x, y) {
+            for (nx, ny, direction) in self.each_neighbor(x, y) {
                 if self.has_wall(x, y, direction) || came_from.contains_key(&(nx, ny)) {
                     continue;
                 }
@@ -980,6 +1061,92 @@ mod tests {
                 .unwrap_or(0)
         ));
         path
+    }
+
+    #[test]
+    fn neighbors_packs_its_entries_at_the_front_of_the_array() {
+        // The indexed access the algorithms rely on is only correct while the
+        // Some entries come before the None ones.
+        let map = Map::new(3, 3);
+        for y in 0..3 {
+            for x in 0..3 {
+                let neighbors = map.neighbors(x, y);
+                let count = neighbors.iter().filter(|n| n.is_some()).count();
+                assert!(
+                    neighbors[..count].iter().all(Option::is_some),
+                    "({x},{y}) has a gap before its {count} entries"
+                );
+                assert!(
+                    neighbors[count..].iter().all(Option::is_none),
+                    "({x},{y}) has an entry after its {count} entries"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neighbor_count_agrees_with_the_packed_array_everywhere() {
+        let map = Map::new(4, 3);
+        for y in 0..3 {
+            for x in 0..4 {
+                let count = map.neighbor_count(x, y);
+                let packed = map.neighbors(x, y);
+                assert_eq!(
+                    count,
+                    packed.iter().filter(|n| n.is_some()).count(),
+                    "neighbor_count disagrees with neighbors at ({x},{y})"
+                );
+                for (index, entry) in packed.iter().enumerate().take(count) {
+                    assert_eq!(
+                        map.neighbor_at(x, y, index),
+                        entry.expect("packed entry"),
+                        "neighbor_at disagrees with neighbors at ({x},{y})[{index}]"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn neighbor_count_follows_the_position_not_the_walls() {
+        // A cell keeps its neighbours whether or not the walls are standing,
+        // which is what lets the algorithms carve towards a walled neighbour.
+        let walled = Map::new(3, 3);
+        let mut open = Map::with_open_grid(3, 3);
+        assert!(open.carve(1, 1, Direction::North));
+        for (map, label) in [(&walled, "walled"), (&open, "open")] {
+            assert_eq!(map.neighbor_count(1, 1), 4, "{label} centre");
+            assert_eq!(map.neighbor_count(0, 0), 2, "{label} corner");
+            assert_eq!(map.neighbor_count(1, 0), 3, "{label} edge");
+        }
+    }
+
+    #[test]
+    fn neighbors_of_a_cell_outside_the_maze_is_empty() {
+        let map = Map::new(2, 2);
+        assert_eq!(map.neighbor_count(2, 0), 0);
+        assert_eq!(map.neighbor_count(0, 2), 0);
+        assert!(map.neighbors(5, 5).iter().all(Option::is_none));
+        assert_eq!(map.each_neighbor(5, 5).count(), 0);
+    }
+
+    #[test]
+    fn each_neighbor_yields_the_packed_entries_in_order() {
+        let map = Map::new(3, 3);
+        // Corners list two neighbours, and they come in Direction::ALL order.
+        assert_eq!(
+            map.each_neighbor(0, 0).collect::<Vec<_>>(),
+            vec![(1, 0, Direction::East), (0, 1, Direction::South)]
+        );
+        assert_eq!(
+            map.each_neighbor(2, 2).collect::<Vec<_>>(),
+            vec![(2, 1, Direction::North), (1, 2, Direction::West)]
+        );
+        for y in 0..3 {
+            for x in 0..3 {
+                assert_eq!(map.each_neighbor(x, y).count(), map.neighbor_count(x, y));
+            }
+        }
     }
 
     #[test]
