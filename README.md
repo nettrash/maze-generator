@@ -126,8 +126,8 @@ normal `cargo test` run does not pay for them.
 They cover generation for all six algorithms at 50x50 and 100x100, the cost of
 the `--braid` and `--entrance-exit` variants on top of plain generation, the
 `Map` hot paths (`to_ascii`, `from_ascii`, `is_perfect`, `is_solvable`, `solve`,
-`dead_ends`, `neighbors`, `neighbor_count`, `each_neighbor`, `to_svg`), file
-saving and loading, and the random number generator on its own.
+`dead_ends`, `dead_end_count`, `neighbors`, `neighbor_count`, `each_neighbor`,
+`to_svg`), file saving and loading, and the random number generator on its own.
 
 Expect Aldous-Broder and Wilson to be the slowest by a wide margin: unlike the
 four spanning-tree algorithms they revisit cells rather than carving each wall
