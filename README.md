@@ -90,6 +90,7 @@ border is rejected, since version 1 could not represent that.
 cd app
 cargo test              # unit, integration and property tests
 cargo test --test properties   # the property tests on their own
+cargo bench             # benchmarks, and they are not part of cargo test
 ```
 
 Alongside the hand-written unit and integration tests, `tests/properties.rs`
@@ -99,3 +100,22 @@ every algorithm produces a perfect, solvable maze at any size including `1x1`,
 `1xN` and `Nx1`; a seed always reproduces its maze; the text format round
 trips exactly; braiding never disconnects a maze nor builds a wall back; and
 every route `solve` reports really walks the maze without crossing a wall.
+
+## Benchmarks
+
+`cargo bench` runs the [criterion](https://bheisler.github.io/criterion.rs/)
+benchmarks in `app/benches/generation.rs` and writes an HTML report to
+`app/target/criterion/report/index.html`. They are a separate target, so the
+normal `cargo test` run does not pay for them.
+
+They cover generation for all six algorithms at 50x50 and 100x100, the cost of
+the `--braid` and `--entrance-exit` variants on top of plain generation, the
+`Map` hot paths (`to_ascii`, `from_ascii`, `is_perfect`, `is_solvable`, `solve`,
+`dead_ends`, `neighbors`, `to_svg`), file saving and loading, and the random
+number generator on its own.
+
+Expect Aldous-Broder and Wilson to be the slowest by a wide margin: unlike the
+four spanning-tree algorithms they revisit cells rather than carving each wall
+exactly once, so their cost grows faster than the number of cells. On a 100x100
+grid that is roughly 10 ms for Aldous-Broder and 1.4 ms for Wilson, against
+about 0.1 to 0.7 ms for the rest.

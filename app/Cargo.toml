@@ -19,3 +19,8 @@ clap = { version = "4.5.56", features = ["derive"] }
 
 [dev-dependencies]
 proptest = { version = "1.9", default-features = false, features = ["std"] }
+criterion = "0.8"
+
+[[bench]]
+name = "generation"
+harness = false
