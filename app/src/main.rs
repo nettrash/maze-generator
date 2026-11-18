@@ -158,7 +158,7 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
             println!("Loaded a {}x{} maze from {path}", map.width(), map.height());
             println!("Perfect: {}", map.is_perfect());
             println!("Solvable: {}", map.is_solvable());
-            println!("Dead ends: {}", map.dead_ends().len());
+            println!("Dead ends: {}", map.dead_end_count());
             let openings = count_border_openings(&map);
             if openings > 0 {
                 println!("Border openings: {openings}");

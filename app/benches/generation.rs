@@ -136,6 +136,11 @@ fn map_operations(c: &mut Criterion) {
         b.iter(|| black_box(map.dead_ends()).len());
     });
 
+    // What `check` actually asks for: the number, without the list.
+    group.bench_function("dead_end_count", |b| {
+        b.iter(|| black_box(map.dead_end_count()));
+    });
+
     // The whole-grid walk is what the algorithms themselves do, so it is the
     // version worth watching for a stray allocation.
     group.bench_function("neighbors over every cell", |b| {

@@ -418,6 +418,23 @@ impl Map {
         dead_ends
     }
 
+    /// How many cells are dead ends.
+    ///
+    /// The same walk as [`Map::dead_ends`] without building the list, for
+    /// callers that only want the number. On a maze with no walls that is the
+    /// difference between a `Vec` of every cell and no allocation at all.
+    pub fn dead_end_count(&self) -> usize {
+        let mut count = 0;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if self.passage_count(x, y) == 1 {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     /// How many of a cell's four sides are open, counting border openings.
     fn passage_count(&self, x: usize, y: usize) -> usize {
         Direction::ALL
@@ -1387,6 +1404,34 @@ mod tests {
         crate::Generator::new(12, 9, "backtracking", Some(seed))
             .expect("known algorithm")
             .build()
+    }
+
+    #[test]
+    fn dead_end_counts_agree_with_the_list() {
+        // The counting walk must not drift from the listing one: they are the
+        // same iterator, but `check` uses the count and tests use the list.
+        for name in crate::ALGORITHMS {
+            for seed in [1, 2, 3] {
+                let map = crate::Generator::new(13, 10, name, Some(seed))
+                    .expect("known algorithm")
+                    .build();
+                assert_eq!(
+                    map.dead_end_count(),
+                    map.dead_ends().len(),
+                    "{name} at seed {seed}"
+                );
+            }
+        }
+        // A corridor has exactly two cul-de-sacs, its ends.
+        let mut map = Map::new(3, 1);
+        map.carve(0, 0, Direction::East);
+        map.carve(1, 0, Direction::East);
+        assert_eq!(map.dead_end_count(), 2);
+        assert_eq!(map.dead_ends(), vec![(0, 0), (2, 0)]);
+        // With no walls at all nothing is a cul-de-sac.
+        let open = Map::with_open_grid(3, 3);
+        assert_eq!(open.dead_end_count(), 0);
+        assert!(open.dead_ends().is_empty());
     }
 
     #[test]
