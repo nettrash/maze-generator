@@ -6,6 +6,7 @@ use crate::{
     },
     error::MazeError,
     map::Map,
+    rng::Rng,
 };
 
 /// The algorithm names accepted by [`Generator::new`] and by the `--algorithm`
@@ -19,10 +20,32 @@ pub const ALGORITHMS: [&str; 6] = [
     "eller",
 ];
 
+/// Variants applied to a maze after the algorithm has finished.
+///
+/// Both default to `false`, which leaves the plain perfect maze the algorithms
+/// produce on their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MazeOptions {
+    /// Knock a wall down at every dead end, so the maze has loops and no
+    /// cul-de-sacs. This is what is usually called a *braided* maze.
+    pub braid: bool,
+    /// Open the outer border at the entrance and the exit instead of keeping
+    /// the maze fully enclosed.
+    pub entrance_exit: bool,
+}
+
+impl MazeOptions {
+    /// Whether any variant was asked for.
+    pub fn is_plain(&self) -> bool {
+        !self.braid && !self.entrance_exit
+    }
+}
+
 pub struct Generator {
     pub width: u64,
     pub height: u64,
     pub algorithm: Box<dyn AlgorithmAbstraction>,
+    options: MazeOptions,
 }
 
 impl Generator {
@@ -59,7 +82,19 @@ impl Generator {
             width,
             height,
             algorithm: alg,
+            options: MazeOptions::default(),
         })
+    }
+
+    /// Asks for maze variants on top of what the algorithm produces.
+    pub fn with_options(mut self, options: MazeOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// The variants this generator applies after the algorithm has run.
+    pub fn options(&self) -> MazeOptions {
+        self.options
     }
 
     /// The seed the algorithm will use, useful for reproducing a maze.
@@ -75,8 +110,25 @@ impl Generator {
             self.algorithm.get_algorithm_type().as_string(),
             self.seed()
         );
-        let map = self.algorithm.generate_maze(self.width, self.height);
-        Ok(map)
+        Ok(self.build())
+    }
+
+    /// Runs the algorithm and applies the requested variants.
+    ///
+    /// Braiding draws its choices from the generator's seed, so a braided maze
+    /// is just as reproducible as a plain one.
+    pub fn build(&self) -> Map {
+        let mut map = self.algorithm.generate_maze(self.width, self.height);
+        if self.options.entrance_exit {
+            map.open_entrance_and_exit();
+        }
+        if self.options.braid {
+            // A derived seed rather than the algorithm's own, so the braid
+            // choices do not repeat the sequence the algorithm just drew from.
+            let derived = self.seed().wrapping_add(0x9E37_79B9_7F4A_7C15);
+            map.braid(&mut Rng::new(derived));
+        }
+        map
     }
 }
 

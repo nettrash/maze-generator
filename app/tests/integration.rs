@@ -1,7 +1,7 @@
 //! End-to-end tests that exercise the crate the way a consumer would, through
 //! the public API only.
 
-use maze::{ALGORITHMS, AlgorithmType, Direction, Generator, Map, MazeError, Rng};
+use maze::{ALGORITHMS, AlgorithmType, Direction, Generator, Map, MazeError, MazeOptions, Rng};
 
 #[tokio::test]
 async fn every_algorithm_builds_a_perfect_solvable_maze() {
@@ -190,4 +190,63 @@ async fn svg_export_round_trips_to_disk() {
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn braided_mazes_have_no_dead_ends_and_stay_connected() {
+    for name in ALGORITHMS {
+        let map = Generator::new(14, 10, name, Some(21))
+            .expect("known algorithm")
+            .with_options(MazeOptions {
+                braid: true,
+                entrance_exit: false,
+            })
+            .build();
+
+        assert_eq!(
+            map.dead_ends().len(),
+            0,
+            "{name} left a cul-de-sac when braided"
+        );
+        assert!(map.is_solvable(), "{name} became unsolvable when braided");
+        assert!(!map.is_perfect(), "{name} gained no loop when braided");
+    }
+}
+
+#[tokio::test]
+async fn entrance_and_exit_openings_survive_a_round_trip() {
+    let dir = std::env::temp_dir().join("maze-integration-variants");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let map = Generator::new(10, 8, "wilson", Some(3))
+        .expect("known algorithm")
+        .with_options(MazeOptions {
+            braid: true,
+            entrance_exit: true,
+        })
+        .build();
+
+    assert!(map.is_border_open(0, 0, Direction::West));
+    assert!(map.is_border_open(9, 7, Direction::East));
+
+    let path = dir.join("variant.maze");
+    map.save_to_file(&path).unwrap();
+    let loaded = Map::load_from_file(&path).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(loaded.to_ascii(), map.to_ascii());
+    assert!(loaded.is_border_open(0, 0, Direction::West));
+    assert!(loaded.is_border_open(9, 7, Direction::East));
+    assert_eq!(loaded.dead_ends().len(), 0);
+    assert!(loaded.is_solvable());
+}
+
+#[test]
+fn a_plain_generator_is_the_default() {
+    let generator = Generator::new(6, 6, "prim", Some(1)).expect("known algorithm");
+    assert!(generator.options().is_plain());
+    let map = generator.build();
+    assert!(map.is_perfect());
+    assert!(!map.dead_ends().is_empty());
+    assert!(!map.is_border_open(0, 0, Direction::West));
 }

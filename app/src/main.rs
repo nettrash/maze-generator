@@ -3,7 +3,7 @@ use clap::{CommandFactory, Parser};
 use std::fs;
 use std::process::ExitCode;
 
-use maze::generator::Generator;
+use maze::generator::{Generator, MazeOptions};
 use maze::map::Map;
 
 // Command line arguments.
@@ -52,6 +52,15 @@ struct Args {
     /// File to load a maze from, for the check and solve commands
     #[arg(long)]
     input: Option<String>,
+
+    /// Remove every dead end, adding loops instead
+    /// The maze stays fully connected but is no longer a perfect maze
+    #[arg(long)]
+    braid: bool,
+
+    /// Open the outer border at the entrance and the exit
+    #[arg(long)]
+    entrance_exit: bool,
 }
 
 /// The file formats `--output` can write.
@@ -116,6 +125,10 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
                 args.algorithm.as_deref().unwrap_or("backtracking"),
                 args.seed,
             )?;
+            let generator = generator.with_options(MazeOptions {
+                braid: args.braid,
+                entrance_exit: args.entrance_exit,
+            });
             let map = generator.generate().await?;
             match args.output.as_deref() {
                 Some(path) => {
@@ -145,6 +158,11 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
             println!("Loaded a {}x{} maze from {path}", map.width(), map.height());
             println!("Perfect: {}", map.is_perfect());
             println!("Solvable: {}", map.is_solvable());
+            println!("Dead ends: {}", map.dead_ends().len());
+            let openings = count_border_openings(&map);
+            if openings > 0 {
+                println!("Border openings: {openings}");
+            }
         }
         Some("solve") => {
             intro();
@@ -190,6 +208,21 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
     Ok(())
 }
 
+/// Counts the holes an [`Map::open_border`] call made in the outer border.
+fn count_border_openings(map: &maze::Map) -> usize {
+    let (width, height) = (map.width() as usize, map.height() as usize);
+    let mut openings = 0;
+    for x in 0..width {
+        openings += usize::from(map.is_border_open(x, 0, maze::Direction::North));
+        openings += usize::from(map.is_border_open(x, height - 1, maze::Direction::South));
+    }
+    for y in 0..height {
+        openings += usize::from(map.is_border_open(0, y, maze::Direction::West));
+        openings += usize::from(map.is_border_open(width - 1, y, maze::Direction::East));
+    }
+    openings
+}
+
 /// Builds the error used for bad command line usage, so the process exits with
 /// a failure status and a message on stderr rather than a panic.
 fn input_error(message: impl Into<String>) -> maze::MazeError {
@@ -206,7 +239,7 @@ fn intro() {
     let year_str = if year == 2026 {
         "2026".to_string()
     } else {
-        format!("2026-{}", year)
+        format!("2026-{year}")
     };
     println!("(c) {year_str} nettrash. All rights reserved.");
     println!("This program is licensed under the MIT License.");

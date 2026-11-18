@@ -47,6 +47,29 @@ for printing and sharing: walls are strokes on a white background, so the file
 stays sharp at any size, but it is a one-way export. `solve --output` draws the
 solution path as a green line under the walls.
 
+## Maze variants
+
+By default every maze is *perfect*: the walls form a spanning tree, so there is
+exactly one route between any two cells. Two optional shapes change that.
+
+**Braided** mazes have their dead ends knocked out with extra openings, so
+there are loops and more than one way around:
+
+```sh
+maze --command generate --width 20 --height 20 --algorithm prim --braid
+```
+
+**Entrance and exit** openings punch a hole in the outer border at the start and
+end cells, so the maze reads as somewhere you can actually walk in:
+
+```sh
+maze --command generate --width 20 --height 20 --algorithm prim --entrance-exit
+```
+
+The flags combine, and both survive a save/load round trip. A braided maze is no
+longer perfect, so `check` reports `Perfect: false` and `Dead ends: 0` for it,
+and `solve` returns the shortest of the several routes available.
+
 ## Reproducible mazes
 
 Every run picks a random seed and prints it, so passing `--seed` is optional.
@@ -55,6 +78,8 @@ same maze, which makes a maze worth keeping easy to regenerate.
 
 ## Maze file format
 
-A saved maze is a plain text document: a `maze 1` marker line, a `width height`
+A saved maze is a plain text document: a `maze 2` marker line, a `width height`
 line, and the ASCII rendering of the maze. The rendering is lossless, so loading
-a saved maze reproduces the maze it came from.
+a saved maze reproduces the maze it came from, dead-end openings and border holes
+included. Version 1 files are still readable, but one with a hole in its outer
+border is rejected, since version 1 could not represent that.

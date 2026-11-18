@@ -1,10 +1,22 @@
 //! In-memory representation of a maze, plus its text file format.
 //!
 //! A maze is a grid of cells where every cell keeps a bitmask of the walls on
-//! its four sides. The generator produces *perfect* mazes: the walls form a
-//! spanning tree, so there is exactly one path between any two cells (see the
-//! project README, which requires a single path from the top-left corner to the
-//! bottom-right corner).
+//! its four sides. By default the generator produces *perfect* mazes: the walls
+//! form a spanning tree, so there is exactly one path between any two cells
+//! (see the project README, which requires a single path from the top-left
+//! corner to the bottom-right corner).
+//!
+//! # Variants
+//!
+//! Two optional shapes are supported on top of the perfect default, both
+//! reachable through [`crate::Generator`] and its [`crate::MazeOptions`]:
+//!
+//! - *Braided* mazes have their dead ends knocked out with extra openings, so
+//!   there are loops and more than one route between cells. See [`Map::braid`]
+//!   and [`Map::dead_ends`].
+//! - *Entrance and exit* openings punch a hole in the outer border at the
+//!   start and end cells. See [`Map::open_entrance_and_exit`] and
+//!   [`Map::is_border_open`].
 //!
 //! # File format
 //!
@@ -12,7 +24,7 @@
 //! [`Map::load_from_file`] reads it back:
 //!
 //! ```text
-//! maze 1
+//! maze 2
 //! 3 2
 //! +--+--+--+
 //! |        |
@@ -26,7 +38,12 @@
 //! The first line is a magic marker and the format version, the second line is
 //! `width height`, and the remaining `2 * height + 1` lines are the ASCII
 //! rendering of the maze. The rendering is lossless: loading a saved maze
-//! always reproduces the maze it came from.
+//! always reproduces the maze it came from, including its extra openings and
+//! border holes.
+//!
+//! Version 1 of the format predates border openings and is still readable, but
+//! a version 1 file with a hole in its outer border is rejected. Newly written
+//! files use version 2.
 //!
 //! # Solving
 //!
@@ -46,6 +63,8 @@ use std::fs;
 use std::io::{BufWriter, Error, ErrorKind, Write};
 use std::path::Path;
 
+use crate::rng::Rng;
+
 /// Wall bit set on the north side of a cell.
 pub const WALL_NORTH: u8 = 0b0001;
 /// Wall bit set on the east side of a cell.
@@ -61,7 +80,13 @@ const WALLS_ALL: u8 = WALL_NORTH | WALL_EAST | WALL_SOUTH | WALL_WEST;
 /// Magic marker at the start of the first line of a maze file.
 const MAGIC: &str = "maze";
 /// Version of the maze file format written by [`Map::save_to_file`].
-const FORMAT_VERSION: u32 = 1;
+///
+/// Version 1 requires a solid outer border. Version 2 also allows the border to
+/// be opened by [`Map::open_border`] for an entrance or an exit, so both are
+/// read but only the current one is written.
+const FORMAT_VERSION: u32 = 2;
+/// Oldest file format version this crate can still read.
+const MIN_FORMAT_VERSION: u32 = 1;
 
 /// Number of characters a single cell occupies when rendered as ASCII art.
 const CELL_WIDTH: usize = 3;
@@ -193,14 +218,10 @@ impl Map {
 
     /// Whether a wall stands on the given side of a cell.
     ///
-    /// Asking about a side that leaves the maze always reports a wall: the
-    /// outer border can never be removed.
+    /// A side that leaves the maze reports a wall unless it was opened by
+    /// [`Map::open_border`], which is how an entrance or exit is represented.
     pub fn has_wall(&self, x: usize, y: usize, direction: Direction) -> bool {
         if x >= self.width || y >= self.height {
-            return true;
-        }
-        let (dx, dy) = direction.offset();
-        if !self.in_bounds(x as i64 + dx, y as i64 + dy) {
             return true;
         }
         self.cell(x, y) & direction.wall_bit() != 0
@@ -244,6 +265,99 @@ impl Map {
         *self.cell_mut(x, y) &= !direction.wall_bit();
         *self.cell_mut(nx, ny) &= !direction.opposite().wall_bit();
         true
+    }
+
+    /// Knocks a hole in the outer border, returning whether there was a border
+    /// wall there to remove.
+    ///
+    /// This is how an entrance or an exit is made: the maze stays enclosed
+    /// everywhere else, but the given side of the given cell opens to the
+    /// outside. The opening is drawn by [`Map::to_ascii`] and survives a save
+    /// and load round trip.
+    pub fn open_border(&mut self, x: usize, y: usize, direction: Direction) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+        let (dx, dy) = direction.offset();
+        if self.in_bounds(x as i64 + dx, y as i64 + dy) {
+            return false;
+        }
+        let had_wall = self.cell(x, y) & direction.wall_bit() != 0;
+        *self.cell_mut(x, y) &= !direction.wall_bit();
+        had_wall
+    }
+
+    /// Whether the outer border is open on the given side of a cell.
+    pub fn is_border_open(&self, x: usize, y: usize, direction: Direction) -> bool {
+        let (dx, dy) = direction.offset();
+        if self.in_bounds(x as i64 + dx, y as i64 + dy) {
+            return false;
+        }
+        !self.has_wall(x, y, direction)
+    }
+
+    /// Opens the conventional entrance and exit: the west side of the top-left
+    /// cell and the east side of the bottom-right cell.
+    ///
+    /// Returns whether both openings were made, which fails only on an empty
+    /// maze.
+    pub fn open_entrance_and_exit(&mut self) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        let entrance = self.open_border(0, 0, Direction::West);
+        let exit = self.open_border(self.width - 1, self.height - 1, Direction::East);
+        entrance && exit
+    }
+
+    /// The cells with only one opening, which are the cul-de-sacs of the maze.
+    pub fn dead_ends(&self) -> Vec<(usize, usize)> {
+        let mut dead_ends = Vec::new();
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if self.passage_count(x, y) == 1 {
+                    dead_ends.push((x, y));
+                }
+            }
+        }
+        dead_ends
+    }
+
+    /// How many of a cell's four sides are open, counting border openings.
+    fn passage_count(&self, x: usize, y: usize) -> usize {
+        Direction::ALL
+            .iter()
+            .filter(|direction| !self.has_wall(x, y, **direction))
+            .count()
+    }
+
+    /// Removes a wall at every dead end, turning a perfect maze into a braided
+    /// one with no cul-de-sacs.
+    ///
+    /// Each dead end is joined to one of its walled neighbours, which adds a
+    /// loop rather than removing a route, so the maze stays connected and every
+    /// cell stays reachable. A cell whose four sides are all open already is
+    /// left alone. Returns the number of walls removed.
+    pub fn braid(&mut self, rng: &mut Rng) -> usize {
+        let mut removed = 0;
+        for (x, y) in self.dead_ends() {
+            // Collect the candidates first: carving changes the maze, so the
+            // list must not be built while it is being walked.
+            let candidates: Vec<Direction> = Direction::ALL
+                .iter()
+                .copied()
+                .filter(|direction| self.neighbor(x, y, *direction).is_some())
+                .filter(|direction| self.has_wall(x, y, *direction))
+                .collect();
+            if candidates.is_empty() {
+                continue;
+            }
+            let direction = candidates[rng.below(candidates.len() as u64) as usize];
+            if self.carve(x, y, direction) {
+                removed += 1;
+            }
+        }
+        removed
     }
 
     /// Rebuilds the wall between a cell and its neighbour.
@@ -318,12 +432,18 @@ impl Map {
     /// Renders the horizontal wall line above row `y`.
     ///
     /// Row `0` is the top border and row `height` the bottom border; both are
-    /// always solid.
+    /// solid except where [`Map::open_border`] made an opening.
     fn horizontal_line(&self, y: usize) -> String {
         let mut line = String::with_capacity(CELL_WIDTH * self.width + 1);
         line.push('+');
         for x in 0..self.width {
-            let solid = y == 0 || y == self.height || self.cell(x, y - 1) & WALL_SOUTH != 0;
+            let solid = match y {
+                0 => self.has_wall(x, 0, Direction::North),
+                y if y == self.height => self.has_wall(x, y - 1, Direction::South),
+                y => self.cell(x, y - 1) & WALL_SOUTH != 0,
+            };
+            // An opened border is drawn as a gap, and the cell below it is
+            // where a path marker belongs.
             let ch = if solid { '-' } else { ' ' };
             for _ in 0..CELL_WIDTH - 1 {
                 line.push(ch);
@@ -340,7 +460,11 @@ impl Map {
     /// instead of blanks.
     fn vertical_line(&self, y: usize, path: Option<&PathMark>) -> String {
         let mut line = String::with_capacity(CELL_WIDTH * self.width + 1);
-        line.push('|');
+        line.push(if self.has_wall(0, y, Direction::West) {
+            '|'
+        } else {
+            ' '
+        });
         for x in 0..self.width {
             match path.and_then(|path| path.interior(x, y)) {
                 Some(interior) => line.push_str(&interior),
@@ -350,9 +474,11 @@ impl Map {
                     }
                 }
             }
-            let border = x + 1 == self.width;
-            let wall = self.cell(x, y) & WALL_EAST != 0;
-            line.push(if border || wall { '|' } else { ' ' });
+            line.push(if self.has_wall(x, y, Direction::East) {
+                '|'
+            } else {
+                ' '
+            });
         }
         line
     }
@@ -554,11 +680,14 @@ impl Map {
             .ok_or_else(|| invalid("missing format version in header line"))?
             .parse()
             .map_err(|_| invalid("format version is not a number"))?;
-        if version != FORMAT_VERSION {
+        if !(MIN_FORMAT_VERSION..=FORMAT_VERSION).contains(&version) {
             return Err(invalid(format!(
-                "unsupported format version {version}, expected {FORMAT_VERSION}"
+                "unsupported format version {version}, expected {MIN_FORMAT_VERSION} to {FORMAT_VERSION}"
             )));
         }
+        // Only version 2 can represent an opening in the outer border, so a
+        // version 1 file with a gap there is corrupt rather than open.
+        let border_may_be_open = version >= 2;
 
         let dims = lines
             .next()
@@ -614,21 +743,20 @@ impl Map {
                         )));
                     }
                     if border {
-                        if a != '-' {
+                        if a == '-' {
+                            if y == 0 {
+                                *map.cell_mut(x, 0) |= WALL_NORTH;
+                            } else {
+                                *map.cell_mut(x, height - 1) |= WALL_SOUTH;
+                            }
+                        } else if !border_may_be_open {
                             return Err(invalid(format!(
-                                "art line {row}: the outer border must be solid"
+                                "art line {row}: format version {version} requires a solid outer border"
                             )));
                         }
-                        if y == 0 {
-                            *map.cell_mut(x, 0) |= WALL_NORTH;
-                        } else {
-                            *map.cell_mut(x, height - 1) |= WALL_SOUTH;
-                        }
-                    } else {
-                        if a == '-' {
-                            *map.cell_mut(x, y - 1) |= WALL_SOUTH;
-                            *map.cell_mut(x, y) |= WALL_NORTH;
-                        }
+                    } else if a == '-' {
+                        *map.cell_mut(x, y - 1) |= WALL_SOUTH;
+                        *map.cell_mut(x, y) |= WALL_NORTH;
                     }
                 }
             } else {
@@ -645,15 +773,20 @@ impl Map {
                 for x in 0..=width {
                     let ch = chars[CELL_WIDTH * x];
                     if x == 0 || x == width {
-                        if ch != '|' {
+                        if ch == '|' {
+                            if x == 0 {
+                                *map.cell_mut(0, y) |= WALL_WEST;
+                            } else {
+                                *map.cell_mut(width - 1, y) |= WALL_EAST;
+                            }
+                        } else if ch != ' ' {
                             return Err(invalid(format!(
-                                "art line {row}: the outer border must be solid"
+                                "art line {row}: unexpected character '{ch}'"
                             )));
-                        }
-                        if x == 0 {
-                            *map.cell_mut(0, y) |= WALL_WEST;
-                        } else {
-                            *map.cell_mut(width - 1, y) |= WALL_EAST;
+                        } else if !border_may_be_open {
+                            return Err(invalid(format!(
+                                "art line {row}: format version {version} requires a solid outer border"
+                            )));
                         }
                     } else if ch != '|' && ch != ' ' {
                         return Err(invalid(format!(
@@ -915,7 +1048,7 @@ mod tests {
         let _ = fs::remove_file(&path);
 
         let mut lines = text.lines();
-        assert_eq!(lines.next(), Some("maze 1"));
+        assert_eq!(lines.next(), Some("maze 2"));
         assert_eq!(lines.next(), Some("3 2"));
     }
 
@@ -1013,6 +1146,231 @@ mod tests {
         assert!(!map.is_solvable());
         assert!(!map.is_perfect());
         assert_eq!(map.to_ascii(), "");
+    }
+
+    /// A perfect maze of a size big enough to have real dead ends.
+    fn perfect_maze(seed: u64) -> Map {
+        crate::Generator::new(12, 9, "backtracking", Some(seed))
+            .expect("known algorithm")
+            .build()
+    }
+
+    #[test]
+    fn a_plain_maze_keeps_its_dead_ends_and_its_border() {
+        let map = perfect_maze(4);
+        assert!(!map.dead_ends().is_empty(), "the fixture has no dead ends");
+        for y in 0..map.height() as usize {
+            assert!(!map.is_border_open(0, y, Direction::West));
+            assert!(!map.is_border_open(map.width() as usize - 1, y, Direction::East));
+        }
+    }
+
+    #[test]
+    fn braiding_removes_every_dead_end() {
+        let mut map = perfect_maze(4);
+        let before = map.dead_ends().len();
+        assert!(before > 0);
+
+        let removed = map.braid(&mut Rng::new(1));
+        assert!(removed > 0, "braiding should remove some walls");
+        assert_eq!(
+            map.dead_ends().len(),
+            0,
+            "a braided maze should have no cul-de-sacs left"
+        );
+    }
+
+    #[test]
+    fn braiding_keeps_the_maze_connected_and_solvable() {
+        let mut map = perfect_maze(9);
+        map.braid(&mut Rng::new(2));
+        assert!(map.is_solvable(), "braiding cut the exit off");
+        assert!(map.solve().is_some());
+        // Braiding only adds openings, so every cell is still reachable.
+        assert_eq!(map.reachable_from_origin().len(), 12 * 9);
+    }
+
+    #[test]
+    fn braiding_adds_loops_so_the_maze_is_no_longer_perfect() {
+        let mut map = perfect_maze(9);
+        assert!(map.is_perfect());
+        map.braid(&mut Rng::new(3));
+        assert!(!map.is_perfect(), "braiding should have added a loop");
+    }
+
+    #[test]
+    fn braiding_is_reproducible_from_its_seed() {
+        let braid = |seed: u64| {
+            let mut map = perfect_maze(9);
+            map.braid(&mut Rng::new(seed));
+            map.to_ascii()
+        };
+        assert_eq!(braid(5), braid(5));
+        assert_ne!(braid(5), braid(6));
+    }
+
+    #[test]
+    fn a_single_cell_maze_braids_into_itself() {
+        // Its four sides are all border walls, so it has no passage at all and
+        // is not a cul-de-sac. There is nothing to join it to either, so
+        // braiding must be a no-op rather than a panic.
+        let mut map = Map::new(1, 1);
+        assert!(map.dead_ends().is_empty());
+        assert_eq!(map.braid(&mut Rng::new(1)), 0);
+    }
+
+    #[test]
+    fn entrance_and_exit_open_the_border() {
+        let mut map = perfect_maze(4);
+        assert!(map.open_entrance_and_exit());
+        assert!(map.is_border_open(0, 0, Direction::West));
+        assert!(map.is_border_open(11, 8, Direction::East));
+        // Everywhere else stays enclosed.
+        assert!(!map.is_border_open(0, 0, Direction::North));
+        assert!(!map.is_border_open(11, 8, Direction::South));
+        assert!(!map.is_border_open(5, 0, Direction::North));
+    }
+
+    #[test]
+    fn opening_the_border_renders_a_gap() {
+        let mut map = Map::new(2, 1);
+        map.carve(0, 0, Direction::East);
+        assert!(map.open_border(0, 0, Direction::West));
+        // The leading border wall is gone, and the shared wall was already
+        // carved, so only the right border remains on that line.
+        assert_eq!(
+            map.to_ascii(),
+            "+--+--+
+      |
++--+--+"
+        );
+    }
+
+    #[test]
+    fn open_border_only_works_on_the_border() {
+        let mut map = Map::new(3, 3);
+        // An interior side is a shared wall, not a border.
+        assert!(!map.open_border(1, 1, Direction::East));
+        assert!(map.has_wall(1, 1, Direction::East));
+        // Out of bounds cells cannot be opened either.
+        assert!(!map.open_border(9, 9, Direction::North));
+        assert!(map.open_border(1, 0, Direction::North));
+        // Opening twice reports there was nothing left to open.
+        assert!(!map.open_border(1, 0, Direction::North));
+    }
+
+    #[test]
+    fn a_border_opening_survives_a_save_and_load_round_trip() {
+        let mut map = perfect_maze(4);
+        map.open_entrance_and_exit();
+        let path = temp_path("open-border.maze");
+        map.save_to_file(&path).expect("save failed");
+        let loaded = Map::load_from_file(&path).expect("load failed");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.to_ascii(), map.to_ascii());
+        assert!(loaded.is_border_open(0, 0, Direction::West));
+        assert!(loaded.is_border_open(11, 8, Direction::East));
+    }
+
+    #[test]
+    fn a_braided_maze_survives_a_save_and_load_round_trip() {
+        let mut map = perfect_maze(4);
+        map.braid(&mut Rng::new(7));
+        let path = temp_path("braided.maze");
+        map.save_to_file(&path).expect("save failed");
+        let loaded = Map::load_from_file(&path).expect("load failed");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(loaded.to_ascii(), map.to_ascii());
+        assert_eq!(loaded.dead_ends().len(), 0);
+        assert!(loaded.is_solvable());
+    }
+
+    #[test]
+    fn version_one_files_still_load_when_the_border_is_solid() {
+        let path = temp_path("v1.maze");
+        fs::write(
+            &path,
+            "maze 1\n2 1\n+--+--+
+|     |
++--+--+\n",
+        )
+        .unwrap();
+        let map = Map::load_from_file(&path).expect("a v1 file should still load");
+        let _ = fs::remove_file(&path);
+        assert_eq!(map.width(), 2);
+        assert!(!map.is_border_open(0, 0, Direction::West));
+    }
+
+    #[test]
+    fn version_one_files_reject_an_open_border() {
+        // Version 1 has no way to represent an opening, so a gap there is
+        // corrupt data rather than an entrance.
+        let path = temp_path("v1-open.maze");
+        fs::write(
+            &path,
+            "maze 1\n2 1\n+--+--+
+    |  |
++--+--+\n",
+        )
+        .unwrap();
+        let err = Map::load_from_file(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn an_unsupported_version_is_reported() {
+        let path = temp_path("v9.maze");
+        fs::write(&path, "maze 9\n1 1\n+--+\n|  |\n+--+\n").unwrap();
+        let err = Map::load_from_file(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(err.to_string().contains("unsupported format version"));
+    }
+
+    #[test]
+    fn the_generator_applies_the_requested_variants() {
+        let plain = crate::Generator::new(12, 9, "eller", Some(4))
+            .expect("known algorithm")
+            .build();
+        assert!(!plain.dead_ends().is_empty());
+        assert!(!plain.is_border_open(0, 0, Direction::West));
+
+        let braided = crate::Generator::new(12, 9, "eller", Some(4))
+            .expect("known algorithm")
+            .with_options(crate::MazeOptions {
+                braid: true,
+                entrance_exit: false,
+            })
+            .build();
+        assert_eq!(braided.dead_ends().len(), 0);
+
+        let open = crate::Generator::new(12, 9, "eller", Some(4))
+            .expect("known algorithm")
+            .with_options(crate::MazeOptions {
+                braid: false,
+                entrance_exit: true,
+            })
+            .build();
+        assert!(open.is_border_open(0, 0, Direction::West));
+        assert!(open.is_border_open(11, 8, Direction::East));
+        assert!(!open.dead_ends().is_empty(), "braiding should not have run");
+    }
+
+    #[test]
+    fn a_braided_maze_from_the_generator_is_reproducible() {
+        let build = || {
+            crate::Generator::new(12, 9, "wilson", Some(6))
+                .expect("known algorithm")
+                .with_options(crate::MazeOptions {
+                    braid: true,
+                    entrance_exit: true,
+                })
+                .build()
+                .to_ascii()
+        };
+        assert_eq!(build(), build());
     }
 
     /// Walks a 3x2 maze along the bottom row and up the right column, which is
