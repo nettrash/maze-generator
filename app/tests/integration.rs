@@ -141,3 +141,53 @@ fn algorithm_type_names_match_the_cli_spellings() {
         assert!(ALGORITHMS.contains(&name), "{name} is not dispatchable");
     }
 }
+
+#[tokio::test]
+async fn every_algorithm_exports_valid_svg() {
+    for name in ALGORITHMS {
+        let generator = Generator::new(7, 5, name, Some(11)).expect("known algorithm");
+        let map = generator.generate().await.expect("generation failed");
+        let svg = map.to_svg();
+
+        assert!(svg.starts_with("<svg "), "{name} produced no SVG root");
+        assert!(
+            svg.trim_end().ends_with("</svg>"),
+            "{name} left the root open"
+        );
+        assert!(svg.contains("xmlns=\"http://www.w3.org/2000/svg\""));
+        // The document grows with the maze: a 7x5 maze has at least its border.
+        assert!(
+            svg.matches("<line ").count() >= 2 * (7 + 5),
+            "{name} drew too few walls"
+        );
+    }
+}
+
+#[tokio::test]
+async fn svg_export_round_trips_to_disk() {
+    let dir = std::env::temp_dir().join("maze-integration-svg");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let map = Generator::new(6, 4, "kruskal", Some(2))
+        .expect("known algorithm")
+        .generate()
+        .await
+        .unwrap();
+
+    let path = dir.join("maze.svg");
+    map.save_svg_to_file(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), map.to_svg());
+
+    let route = map.solve().expect("a perfect maze is solvable");
+    let solved = dir.join("solved.svg");
+    map.save_svg_to_file_with_path(&solved, &route).unwrap();
+    let solved = std::fs::read_to_string(&solved).unwrap();
+    assert_eq!(solved.matches("<polyline ").count(), 1);
+    // Adding a path must not change the walls.
+    assert_eq!(
+        solved.matches("<line ").count(),
+        map.to_svg().matches("<line ").count()
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

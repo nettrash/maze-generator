@@ -33,6 +33,12 @@
 //! [`Map::solve`] returns the unique route from the top-left corner to the
 //! bottom-right corner, and [`Map::to_ascii_with_path`] renders the maze with
 //! that route drawn onto it.
+//!
+//! # SVG export
+//!
+//! [`Map::to_svg`] and [`Map::to_svg_with_path`] render the maze as a vector
+//! drawing for printing and sharing. It is a one-way export: only the text
+//! format described above is read back.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -59,6 +65,17 @@ const FORMAT_VERSION: u32 = 1;
 
 /// Number of characters a single cell occupies when rendered as ASCII art.
 const CELL_WIDTH: usize = 3;
+
+/// Size of one cell in SVG user units.
+const SVG_CELL: f64 = 20.0;
+/// Colour of the maze walls in the SVG rendering.
+const SVG_WALL_COLOR: &str = "#000000";
+/// Stroke width of the maze walls.
+const SVG_WALL_WIDTH: f64 = 2.0;
+/// Colour of a solution path drawn onto the SVG rendering.
+const SVG_PATH_COLOR: &str = "#1a7f37";
+/// Stroke width of a solution path, thinner than a wall so both stay visible.
+const SVG_PATH_WIDTH: f64 = 6.0;
 
 /// One of the four sides of a cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,6 +374,80 @@ impl Map {
         self.render(Some(&PathMark::new(path)))
     }
 
+    /// Renders the maze as SVG.
+    ///
+    /// Walls are drawn as strokes on a white background, one `<line>` per wall,
+    /// so the output is small and scales to any size without losing quality.
+    /// Returns an empty string for an empty maze.
+    pub fn to_svg(&self) -> String {
+        self.to_svg_with_path(&[])
+    }
+
+    /// Renders the maze as SVG with a solution path drawn underneath the walls.
+    ///
+    /// The path becomes a single rounded polyline through the centres of the
+    /// given cells, drawn before the walls so the walls stay readable on top of
+    /// it. An empty path renders the plain maze.
+    pub fn to_svg_with_path(&self, path: &[(usize, usize)]) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+
+        let width = SVG_CELL * self.width as f64;
+        let height = SVG_CELL * self.height as f64;
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
+             viewBox=\"0 0 {width} {height}\">\n"
+        ));
+        out.push_str(&format!(
+            "<rect width=\"{width}\" height=\"{height}\" fill=\"#ffffff\"/>\n"
+        ));
+
+        if !path.is_empty() {
+            let points: Vec<String> = path
+                .iter()
+                .map(|(x, y)| {
+                    format!(
+                        "{},{}",
+                        (*x as f64 + 0.5) * SVG_CELL,
+                        (*y as f64 + 0.5) * SVG_CELL
+                    )
+                })
+                .collect();
+            out.push_str(&format!(
+                "<polyline fill=\"none\" stroke=\"{SVG_PATH_COLOR}\" stroke-width=\"{SVG_PATH_WIDTH}\" \
+                 stroke-linecap=\"round\" stroke-linejoin=\"round\" points=\"{}\"/>\n",
+                points.join(" ")
+            ));
+        }
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                // Each wall is drawn from exactly one of its two cells: the
+                // north and west walls from the cell that owns them, and the
+                // east and south walls only from the border cells, so no wall
+                // is drawn twice.
+                if self.has_wall(x, y, Direction::North) {
+                    push_segment(&mut out, x, y, x + 1, y);
+                }
+                if self.has_wall(x, y, Direction::West) {
+                    push_segment(&mut out, x, y, x, y + 1);
+                }
+                if x + 1 == self.width && self.has_wall(x, y, Direction::East) {
+                    push_segment(&mut out, x + 1, y, x + 1, y + 1);
+                }
+                if y + 1 == self.height && self.has_wall(x, y, Direction::South) {
+                    push_segment(&mut out, x, y + 1, x + 1, y + 1);
+                }
+            }
+        }
+
+        out.push_str("</svg>\n");
+        out
+    }
+
     /// Shared implementation of the two renderings.
     fn render(&self, path: Option<&PathMark>) -> String {
         if self.is_empty() {
@@ -616,6 +707,35 @@ impl Map {
             .map_err(|e| Error::new(e.kind(), format!("{}: {e}", path.display())))?;
         Map::from_ascii(&text).map_err(|e| Error::new(e.kind(), format!("{}: {e}", path.display())))
     }
+
+    /// Saves the maze to `path` as an SVG document.
+    ///
+    /// Unlike [`Map::save_to_file`] this is a one-way export: the SVG is meant
+    /// for printing and sharing, and is not read back by this crate.
+    pub fn save_svg_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
+        self.save_svg_to_file_with_path(path, &[])
+    }
+
+    /// Saves the maze to `path` as an SVG document with a solution path drawn
+    /// onto it. See [`Map::save_svg_to_file`].
+    pub fn save_svg_to_file_with_path<P: AsRef<Path>>(
+        &self,
+        path: P,
+        route: &[(usize, usize)],
+    ) -> Result<(), Error> {
+        if self.is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cannot save an empty maze",
+            ));
+        }
+        let path = path.as_ref();
+        let file = fs::File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        write!(writer, "{}", self.to_svg_with_path(route))?;
+        writer.flush()?;
+        Ok(())
+    }
 }
 
 /// Which cells of a maze a rendered path covers, and how to draw them.
@@ -667,6 +787,18 @@ impl fmt::Display for Map {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.to_ascii())
     }
+}
+
+/// Appends one wall to `out` as a `<line>` between two cell corners.
+fn push_segment(out: &mut String, x1: usize, y1: usize, x2: usize, y2: usize) {
+    out.push_str(&format!(
+        "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{SVG_WALL_COLOR}\" \
+         stroke-width=\"{SVG_WALL_WIDTH}\"/>\n",
+        x1 as f64 * SVG_CELL,
+        y1 as f64 * SVG_CELL,
+        x2 as f64 * SVG_CELL,
+        y2 as f64 * SVG_CELL,
+    ));
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -988,6 +1120,167 @@ mod tests {
     fn rendering_an_empty_path_is_the_plain_maze() {
         let map = three_by_two_corridor();
         assert_eq!(map.to_ascii_with_path(&[]), map.to_ascii());
+    }
+
+    /// Counts the wall segments the SVG renderer is expected to draw.
+    ///
+    /// A wall is drawn by exactly one owner: the cell to its south owns a
+    /// horizontal wall, and the cell to its east owns a vertical one, except on
+    /// the far border where there is no such cell.
+    fn expected_segment_count(map: &Map) -> usize {
+        let (width, height) = (map.width() as usize, map.height() as usize);
+        let mut count = 0;
+        for y in 0..height {
+            for x in 0..width {
+                if map.has_wall(x, y, Direction::North) {
+                    count += 1;
+                }
+                if map.has_wall(x, y, Direction::West) {
+                    count += 1;
+                }
+                if x + 1 == width && map.has_wall(x, y, Direction::East) {
+                    count += 1;
+                }
+                if y + 1 == height && map.has_wall(x, y, Direction::South) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    /// Checks that every tag opened in `svg` is closed again, which is all the
+    /// well-formedness a hand-written renderer can be trusted for.
+    fn assert_well_formed(svg: &str) {
+        assert!(
+            svg.starts_with("<svg "),
+            "the document must start with the root tag"
+        );
+        assert!(
+            svg.trim_end().ends_with("</svg>"),
+            "the root tag must be closed"
+        );
+        let mut open_tags = Vec::new();
+        for chunk in svg.split('<').skip(1) {
+            let chunk = chunk.trim_start();
+            let tag_end = chunk
+                .find(char::is_whitespace)
+                .unwrap_or_else(|| chunk.find(['>', '/']).unwrap_or(chunk.len()));
+            let name = chunk[..tag_end].trim_end_matches(['>', '/']);
+            if name.starts_with('/') {
+                let closed = name.trim_start_matches('/');
+                assert_eq!(
+                    open_tags.pop().as_deref(),
+                    Some(closed),
+                    "unexpected closing tag {closed}"
+                );
+            } else {
+                let self_closing = chunk[..chunk.find('>').unwrap_or(chunk.len())]
+                    .trim_end()
+                    .ends_with('/');
+                if !self_closing {
+                    open_tags.push(name.to_string());
+                }
+            }
+        }
+        assert!(open_tags.is_empty(), "unclosed tags: {open_tags:?}");
+    }
+
+    #[test]
+    fn svg_draws_one_line_per_wall() {
+        let map = Map::new(3, 2);
+        let svg = map.to_svg();
+        assert_eq!(svg.matches("<line ").count(), expected_segment_count(&map));
+        // A fully walled 3x2 maze has every interior wall plus both borders.
+        assert_eq!(svg.matches("<line ").count(), 17);
+        assert_well_formed(&svg);
+    }
+
+    #[test]
+    fn removing_a_wall_removes_exactly_one_svg_segment() {
+        let mut map = Map::new(4, 3);
+        let before = map.to_svg().matches("<line ").count();
+        assert!(map.carve(1, 1, Direction::East));
+        let after = map.to_svg().matches("<line ").count();
+        assert_eq!(after, before - 1, "a carved wall should disappear once");
+
+        let mut map = Map::new(4, 3);
+        assert!(map.carve(1, 1, Direction::South));
+        assert_eq!(
+            map.to_svg().matches("<line ").count(),
+            before - 1,
+            "a carved horizontal wall should disappear once too"
+        );
+    }
+
+    #[test]
+    fn svg_size_follows_the_maze_dimensions() {
+        let svg = Map::new(5, 3).to_svg();
+        assert!(
+            svg.contains("width=\"100\" height=\"60\""),
+            "expected the document to be 5x3 cells wide: {svg}"
+        );
+        assert!(svg.contains("viewBox=\"0 0 100 60\""));
+    }
+
+    #[test]
+    fn svg_has_a_white_background() {
+        let svg = Map::new(2, 2).to_svg();
+        assert!(svg.contains("fill=\"#ffffff\""), "{svg}");
+    }
+
+    #[test]
+    fn svg_path_is_a_single_polyline_through_the_cell_centres() {
+        let map = three_by_two_corridor();
+        let route = map.solve().expect("the corridor is solvable");
+        let svg = map.to_svg_with_path(&route);
+        assert_eq!(svg.matches("<polyline ").count(), 1);
+        // One point per cell on the route, and the route starts at the centre
+        // of cell (0, 0).
+        let points = svg
+            .split("points=\"")
+            .nth(1)
+            .expect("a points attribute")
+            .split('"')
+            .next()
+            .expect("a terminated points attribute");
+        assert_eq!(points.split(' ').count(), route.len());
+        assert!(
+            points.starts_with("10,10 "),
+            "cell centres should be used: {points}"
+        );
+        assert_well_formed(&svg);
+    }
+
+    #[test]
+    fn svg_without_a_path_has_no_polyline() {
+        let map = three_by_two_corridor();
+        assert!(!map.to_svg().contains("<polyline "));
+        assert_eq!(map.to_svg_with_path(&[]), map.to_svg());
+    }
+
+    #[test]
+    fn an_empty_maze_renders_no_svg() {
+        assert_eq!(Map::new(0, 0).to_svg(), "");
+    }
+
+    #[test]
+    fn save_svg_writes_the_same_document_to_disk() {
+        let map = three_by_two_corridor();
+        let path = temp_path("out.svg");
+        map.save_svg_to_file(&path).expect("saving should work");
+        let written = std::fs::read_to_string(&path).expect("the file should exist");
+        assert_eq!(written, map.to_svg());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn save_svg_refuses_an_empty_maze() {
+        let map = Map::new(0, 0);
+        let error = map
+            .save_svg_to_file(temp_path("empty.svg"))
+            .expect_err("an empty maze cannot be saved");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 
     #[test]

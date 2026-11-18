@@ -18,6 +18,10 @@ maze --command check --input maze.txt
 # Print a maze with its solution path drawn on it
 maze --command solve --input maze.txt
 
+# Export a maze as a vector drawing, for printing or sharing
+maze --command generate --width 30 --height 20 --output maze.svg
+maze --command solve --input maze.txt --output solved.svg
+
 # Reproduce a maze you liked
 maze --command generate --width 20 --height 10 --algorithm wilson --seed 42
 ```
@@ -33,6 +37,15 @@ that route rather than a choice of routes. The entrance is marked `S`, the exit
 `E`, and the corridors in between with `.`. The number of steps is reported
 afterwards. A maze whose exit has been sealed off is printed unsolved and the
 command exits with a failure status.
+
+## Output formats
+
+`--output` writes the plain text format by default, which is the only format
+`--input` can read back. A `.svg` name writes a vector drawing instead, and
+`--format text|svg` overrides that choice whatever the file is called. SVG is
+for printing and sharing: walls are strokes on a white background, so the file
+stays sharp at any size, but it is a one-way export. `solve --output` draws the
+solution path as a green line under the walls.
 
 ## Reproducible mazes
 

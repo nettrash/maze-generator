@@ -1,5 +1,6 @@
 use chrono::Datelike;
 use clap::{CommandFactory, Parser};
+use std::fs;
 use std::process::ExitCode;
 
 use maze::generator::Generator;
@@ -43,9 +44,48 @@ struct Args {
     #[arg(long)]
     output: Option<String>,
 
+    /// Output format for --output
+    /// Defaults to the extension of --output, falling back to text
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
+
     /// File to load a maze from, for the check and solve commands
     #[arg(long)]
     input: Option<String>,
+}
+
+/// The file formats `--output` can write.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputFormat {
+    /// The plain text format this tool also reads back
+    Text,
+    /// A vector drawing for printing and sharing; cannot be read back
+    Svg,
+}
+
+impl OutputFormat {
+    /// Guesses the format from a file extension, or `None` when the name does
+    /// not say.
+    fn from_path(path: &str) -> Option<Self> {
+        match std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("svg") => Some(OutputFormat::Svg),
+            Some("txt" | "maze" | "text" | "ascii") => Some(OutputFormat::Text),
+            _ => None,
+        }
+    }
+
+    /// The name shown to the user.
+    fn name(self) -> &'static str {
+        match self {
+            OutputFormat::Text => "text",
+            OutputFormat::Svg => "SVG",
+        }
+    }
 }
 
 #[tokio::main]
@@ -79,8 +119,19 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
             let map = generator.generate().await?;
             match args.output.as_deref() {
                 Some(path) => {
-                    map.save_to_file(path)?;
-                    println!("Maze saved to {path}");
+                    let format = args
+                        .format
+                        .or_else(|| OutputFormat::from_path(path))
+                        .unwrap_or(OutputFormat::Text);
+                    match format {
+                        OutputFormat::Text => {
+                            map.save_to_file(path)?;
+                        }
+                        OutputFormat::Svg => {
+                            map.save_svg_to_file(path)?;
+                        }
+                    }
+                    println!("Maze saved to {path} as {}", format.name());
                 }
                 None => println!("{map}"),
             }
@@ -102,17 +153,33 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
             };
             let map = Map::load_from_file(path)?;
             println!("Loaded a {}x{} maze from {path}", map.width(), map.height());
-            match map.solve() {
-                Some(route) => {
-                    println!("{}", map.to_ascii_with_path(&route));
-                    // A route of n cells is walked in n - 1 steps.
-                    println!("Solved in {} steps.", route.len() - 1);
+            let Some(route) = map.solve() else {
+                println!("{}", map.to_ascii());
+                println!("No solution: the exit cannot be reached from the entrance.");
+                return Err(input_error("the maze has no solution"));
+            };
+            // A route of n cells is walked in n - 1 steps.
+            println!("Solved in {} steps.", route.len() - 1);
+            match args.output.as_deref() {
+                Some(target) => {
+                    let format = args
+                        .format
+                        .or_else(|| OutputFormat::from_path(target))
+                        .unwrap_or(OutputFormat::Svg);
+                    match format {
+                        OutputFormat::Svg => {
+                            map.save_svg_to_file_with_path(target, &route)?;
+                        }
+                        OutputFormat::Text => {
+                            // The text format cannot carry a path, so the
+                            // marked-up rendering is written instead of the
+                            // loadable one.
+                            fs::write(target, map.to_ascii_with_path(&route))?;
+                        }
+                    }
+                    println!("Solved maze saved to {target} as {}", format.name());
                 }
-                None => {
-                    println!("{}", map.to_ascii());
-                    println!("No solution: the exit cannot be reached from the entrance.");
-                    return Err(input_error("the maze has no solution"));
-                }
+                None => println!("{}", map.to_ascii_with_path(&route)),
             }
         }
         other => {
