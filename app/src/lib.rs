@@ -14,7 +14,7 @@
 //! use maze::Generator;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let generator = Generator::new(8, 6, "backtracking")?;
+//! let generator = Generator::new(8, 6, "backtracking", None)?;
 //! let map = generator.generate().await?;
 //! assert!(map.is_perfect());
 //! # Ok(())

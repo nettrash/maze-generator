@@ -6,7 +6,7 @@ use maze::{ALGORITHMS, AlgorithmType, Direction, Generator, Map, MazeError, Rng}
 #[tokio::test]
 async fn every_algorithm_builds_a_perfect_solvable_maze() {
     for name in ALGORITHMS {
-        let generator = Generator::new(11, 7, name).expect("known algorithm");
+        let generator = Generator::new(11, 7, name, None).expect("known algorithm");
         let map = generator.generate().await.expect("generation failed");
         assert_eq!(map.width(), 11, "{name} width");
         assert_eq!(map.height(), 7, "{name} height");
@@ -22,7 +22,7 @@ async fn generated_mazes_survive_a_save_and_load_round_trip() {
 
     for name in ALGORITHMS {
         let path = dir.join(format!("{name}.maze"));
-        let original = Generator::new(9, 6, name)
+        let original = Generator::new(9, 6, name, None)
             .expect("known algorithm")
             .generate()
             .await
@@ -65,7 +65,7 @@ fn rng_is_reproducible_from_a_seed() {
 
 #[test]
 fn an_unknown_algorithm_reports_the_valid_choices() {
-    let error = Generator::new(4, 4, "depth-first")
+    let error = Generator::new(4, 4, "depth-first", None)
         .err()
         .expect("an unknown algorithm must be rejected");
     assert!(matches!(error, MazeError::UnsupportedAlgorithm { .. }));

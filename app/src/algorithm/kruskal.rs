@@ -1,7 +1,7 @@
 use crate::{
     algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
     map::{Direction, Map},
-    rng::Rng,
+    rng::{Rng, random_seed},
 };
 
 /// Union-find over cell indices, used by Kruskal's algorithm to tell whether
@@ -54,24 +54,33 @@ impl DisjointSet {
 /// Skipping walls that would close a loop leaves exactly a spanning tree, so
 /// the maze is perfect.
 pub struct KruskalAlgorithm {
-    seed: Option<u64>,
+    seed: u64,
 }
 
 impl KruskalAlgorithm {
+    /// Creates the algorithm with a fresh random seed.
     pub fn new() -> Self {
-        KruskalAlgorithm { seed: None }
+        KruskalAlgorithm {
+            seed: random_seed(),
+        }
     }
 
-    /// Creates the algorithm with a fixed seed so its output is reproducible.
+    /// Creates the algorithm with a fixed seed, which makes the mazes it
+    /// produces reproducible.
     pub fn with_seed(seed: u64) -> Self {
-        KruskalAlgorithm { seed: Some(seed) }
+        KruskalAlgorithm { seed }
+    }
+
+    /// Creates the algorithm from an optional seed, falling back to a fresh
+    /// random one when none is given.
+    pub fn with_seed_or_random(seed: Option<u64>) -> Self {
+        KruskalAlgorithm {
+            seed: seed.unwrap_or_else(random_seed),
+        }
     }
 
     fn rng(&self) -> Rng {
-        match self.seed {
-            Some(seed) => Rng::new(seed),
-            None => Rng::from_entropy(),
-        }
+        Rng::new(self.seed)
     }
 }
 
@@ -84,6 +93,10 @@ impl Default for KruskalAlgorithm {
 impl AlgorithmAbstraction for KruskalAlgorithm {
     fn get_algorithm_type(&self) -> AlgorithmType {
         AlgorithmType::Kruskal
+    }
+
+    fn seed(&self) -> u64 {
+        self.seed
     }
 
     fn generate_maze(&self, width: u64, height: u64) -> Map {

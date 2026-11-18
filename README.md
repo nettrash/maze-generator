@@ -14,11 +14,20 @@ maze --command generate --width 20 --height 10 --algorithm eller --output maze.t
 
 # Verify a saved maze
 maze --command check --input maze.txt
+
+# Reproduce a maze you liked
+maze --command generate --width 20 --height 10 --algorithm wilson --seed 42
 ```
 
 Available algorithms: `backtracking`, `prim`, `kruskal`, `aldous_broder`,
 `wilson`, `eller`. All of them produce a perfect maze, meaning exactly one path
 connects any two cells.
+
+## Reproducible mazes
+
+Every run picks a random seed and prints it, so passing `--seed` is optional.
+The same seed with the same width, height and algorithm always produces the
+same maze, which makes a maze worth keeping easy to regenerate.
 
 ## Maze file format
 

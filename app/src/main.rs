@@ -32,6 +32,13 @@ struct Args {
     #[arg(long, default_value = "backtracking")]
     algorithm: Option<String>,
 
+    /// Seed for the random number generator
+    /// Give the same seed to reproduce the same maze; omit it for a new maze
+    /// every run. The seed actually used is always reported, so a maze worth
+    /// keeping can be regenerated.
+    #[arg(long)]
+    seed: Option<u64>,
+
     /// File to save the generated maze to
     #[arg(long)]
     output: Option<String>,
@@ -67,6 +74,7 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
                 args.width.unwrap_or(100),
                 args.height.unwrap_or(100),
                 args.algorithm.as_deref().unwrap_or("backtracking"),
+                args.seed,
             )?;
             let map = generator.generate().await?;
             match args.output.as_deref() {
