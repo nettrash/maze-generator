@@ -83,3 +83,19 @@ line, and the ASCII rendering of the maze. The rendering is lossless, so loading
 a saved maze reproduces the maze it came from, dead-end openings and border holes
 included. Version 1 files are still readable, but one with a hole in its outer
 border is rejected, since version 1 could not represent that.
+
+## Testing
+
+```sh
+cd app
+cargo test              # unit, integration and property tests
+cargo test --test properties   # the property tests on their own
+```
+
+Alongside the hand-written unit and integration tests, `tests/properties.rs`
+uses [`proptest`](https://proptest-rs.github.io/proptest/) to check the
+invariants that must hold for *every* maze rather than for a few fixed seeds:
+every algorithm produces a perfect, solvable maze at any size including `1x1`,
+`1xN` and `Nx1`; a seed always reproduces its maze; the text format round
+trips exactly; braiding never disconnects a maze nor builds a wall back; and
+every route `solve` reports really walks the maze without crossing a wall.

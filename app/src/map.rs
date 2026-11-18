@@ -331,13 +331,18 @@ impl Map {
             .count()
     }
 
-    /// Removes a wall at every dead end, turning a perfect maze into a braided
-    /// one with no cul-de-sacs.
+    /// Removes a wall at every dead end that has one to remove, turning a
+    /// perfect maze into a braided one with no avoidable cul-de-sacs.
     ///
     /// Each dead end is joined to one of its walled neighbours, which adds a
     /// loop rather than removing a route, so the maze stays connected and every
-    /// cell stays reachable. A cell whose four sides are all open already is
-    /// left alone. Returns the number of walls removed.
+    /// cell stays reachable. Returns the number of walls removed.
+    ///
+    /// Only interior walls are touched: opening the outer border belongs to
+    /// [`Map::open_border`], not to braiding. A dead end whose remaining walls
+    /// are all border walls therefore cannot be opened, which happens in very
+    /// narrow mazes such as a 2x1 corridor. [`Map::dead_ends`] still lists
+    /// those cells afterwards.
     pub fn braid(&mut self, rng: &mut Rng) -> usize {
         let mut removed = 0;
         for (x, y) in self.dead_ends() {
@@ -809,6 +814,19 @@ impl Map {
         Ok(map)
     }
 
+    /// Renders the maze in the text format described at the top of this module.
+    ///
+    /// This is exactly what [`Map::save_to_file`] writes, and
+    /// [`Map::from_ascii`] reads it back, so the two are inverses.
+    pub fn to_text(&self) -> String {
+        format!(
+            "{MAGIC} {FORMAT_VERSION}\n{width} {height}\n{ascii}\n",
+            width = self.width,
+            height = self.height,
+            ascii = self.to_ascii()
+        )
+    }
+
     /// Saves the maze to `path` in the text format described at the top of this
     /// module.
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
@@ -821,14 +839,7 @@ impl Map {
         let path = path.as_ref();
         let file = fs::File::create(path)?;
         let mut writer = BufWriter::new(file);
-        writeln!(writer, "{MAGIC} {FORMAT_VERSION}")?;
-        writeln!(
-            writer,
-            "{width} {height}",
-            width = self.width,
-            height = self.height
-        )?;
-        writeln!(writer, "{ascii}", ascii = self.to_ascii())?;
+        writer.write_all(self.to_text().as_bytes())?;
         writer.flush()?;
         Ok(())
     }
@@ -1037,6 +1048,18 @@ mod tests {
 
         assert_eq!(loaded, map);
         assert_eq!(loaded.to_ascii(), map.to_ascii());
+    }
+
+    /// `to_text` is what `save_to_file` writes, so the two must agree exactly.
+    #[test]
+    fn to_text_is_what_the_saved_file_contains() {
+        let map = perfect_maze(4);
+        let path = temp_path("to_text.maze");
+        map.save_to_file(&path).expect("save failed");
+        let text = fs::read_to_string(&path).expect("read failed");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(text, map.to_text());
     }
 
     #[test]
