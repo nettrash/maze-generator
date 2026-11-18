@@ -4,7 +4,7 @@
 //! binary. The interesting parts are:
 //!
 //! - [`Map`] — the in-memory maze, its wall queries, its validation predicates,
-//!   its solver and its text file format.
+//!   its solver, its text file format and its SVG export.
 //! - [`algorithm`] — the [`AlgorithmAbstraction`] trait and the six concrete
 //!   generators.
 //! - [`Generator`] — picks an algorithm by name and runs it.
@@ -34,6 +34,6 @@ pub mod rng;
 pub use algorithm::abstraction::AlgorithmAbstraction;
 pub use algorithm::types::AlgorithmType;
 pub use error::MazeError;
-pub use generator::{ALGORITHMS, Generator};
+pub use generator::{ALGORITHMS, Generator, MazeOptions};
 pub use map::{Direction, Map};
 pub use rng::Rng;
