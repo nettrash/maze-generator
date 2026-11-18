@@ -3,6 +3,7 @@ use clap::{CommandFactory, Parser};
 use std::io::Error;
 
 use crate::maze::generator;
+use crate::maze::map::Map;
 
 pub mod maze;
 
@@ -29,8 +30,17 @@ struct Args {
     height: Option<u64>,
 
     /// Algorithm to use for maze generation
-    #[arg(long, default_value = "basic")]
+    /// Options: backtracking, prim, kruskal, aldous_broder, wilson, eller
+    #[arg(long, default_value = "backtracking")]
     algorithm: Option<String>,
+
+    /// File to save the generated maze to
+    #[arg(long)]
+    output: Option<String>,
+
+    /// File to load a maze from, for the check and solve commands
+    #[arg(long)]
+    input: Option<String>,
 }
 
 #[tokio::main]
@@ -48,13 +58,27 @@ pub async fn main() -> Result<(), Error> {
             let generator = generator::Generator::new(
                 args.width.unwrap_or(100),
                 args.height.unwrap_or(100),
-                args.algorithm.as_deref().unwrap_or("basic"),
+                args.algorithm.as_deref().unwrap_or("backtracking"),
             );
-            generator.generate().await?;
+            let map = generator.generate().await?;
+            match args.output.as_deref() {
+                Some(path) => {
+                    map.save_to_file(path)?;
+                    println!("Maze saved to {path}");
+                }
+                None => println!("{map}"),
+            }
         }
         Some("check") => {
             intro();
-            print!("Checking maze... ");
+            let Some(path) = args.input.as_deref() else {
+                println!("The check command needs an --input file.");
+                return Ok(());
+            };
+            let map = Map::load_from_file(path)?;
+            println!("Loaded a {}x{} maze from {path}", map.width(), map.height());
+            println!("Perfect: {}", map.is_perfect());
+            println!("Solvable: {}", map.is_solvable());
         }
         Some("solve") => {
             intro();
