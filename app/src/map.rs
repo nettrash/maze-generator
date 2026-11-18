@@ -27,8 +27,14 @@
 //! `width height`, and the remaining `2 * height + 1` lines are the ASCII
 //! rendering of the maze. The rendering is lossless: loading a saved maze
 //! always reproduces the maze it came from.
+//!
+//! # Solving
+//!
+//! [`Map::solve`] returns the unique route from the top-left corner to the
+//! bottom-right corner, and [`Map::to_ascii_with_path`] renders the maze with
+//! that route drawn onto it.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{BufWriter, Error, ErrorKind, Write};
@@ -312,12 +318,20 @@ impl Map {
 
     /// Renders the line of cell interiors for row `y`, including the vertical
     /// walls between them.
-    fn vertical_line(&self, y: usize) -> String {
+    ///
+    /// When `path` is given, the cells it covers are drawn with a marker
+    /// instead of blanks.
+    fn vertical_line(&self, y: usize, path: Option<&PathMark>) -> String {
         let mut line = String::with_capacity(CELL_WIDTH * self.width + 1);
         line.push('|');
         for x in 0..self.width {
-            for _ in 0..CELL_WIDTH - 1 {
-                line.push(' ');
+            match path.and_then(|path| path.interior(x, y)) {
+                Some(interior) => line.push_str(&interior),
+                None => {
+                    for _ in 0..CELL_WIDTH - 1 {
+                        line.push(' ');
+                    }
+                }
             }
             let border = x + 1 == self.width;
             let wall = self.cell(x, y) & WALL_EAST != 0;
@@ -328,6 +342,23 @@ impl Map {
 
     /// Renders the maze as ASCII art built from `+`, `-` and `|`.
     pub fn to_ascii(&self) -> String {
+        self.render(None)
+    }
+
+    /// Renders the maze with a solution path drawn onto it.
+    ///
+    /// Path cells are filled with `.`, the first cell of the path with `S` and
+    /// the last with `E`. Walls are drawn exactly as [`Map::to_ascii`] draws
+    /// them, so the two renderings differ only inside path cells.
+    pub fn to_ascii_with_path(&self, path: &[(usize, usize)]) -> String {
+        if path.is_empty() {
+            return self.to_ascii();
+        }
+        self.render(Some(&PathMark::new(path)))
+    }
+
+    /// Shared implementation of the two renderings.
+    fn render(&self, path: Option<&PathMark>) -> String {
         if self.is_empty() {
             return String::new();
         }
@@ -335,11 +366,87 @@ impl Map {
         for y in 0..self.height {
             out.push_str(&self.horizontal_line(y));
             out.push('\n');
-            out.push_str(&self.vertical_line(y));
+            out.push_str(&self.vertical_line(y, path));
             out.push('\n');
         }
         out.push_str(&self.horizontal_line(self.height));
         out
+    }
+
+    /// The unique path from the top-left corner to the bottom-right corner.
+    ///
+    /// The generator produces perfect mazes, so this path is the only route
+    /// between the two corners. It is returned as the list of cells to walk
+    /// through, starting with the entrance cell and ending with the goal cell;
+    /// a maze of width `w` and height `h` therefore has `w + h - 1` cells when
+    /// solved by a straight walk, and more once the corridors wind.
+    ///
+    /// Returns `None` when the goal cannot be reached, which happens for a maze
+    /// that was edited by hand or saved with a broken wall.
+    pub fn solve(&self) -> Option<Vec<(usize, usize)>> {
+        if self.is_empty() {
+            return None;
+        }
+        self.path_between((0, 0), (self.width - 1, self.height - 1))
+    }
+
+    /// The shortest walk from `start` to `goal` through removed walls, or
+    /// `None` when the two are not connected or either is outside the maze.
+    ///
+    /// Breadth-first search is used rather than a shortest-path algorithm
+    /// because every step costs the same, so the first time a cell is reached
+    /// is by a shortest route.
+    pub fn path_between(
+        &self,
+        start: (usize, usize),
+        goal: (usize, usize),
+    ) -> Option<Vec<(usize, usize)>> {
+        if !self.in_bounds(start.0 as i64, start.1 as i64)
+            || !self.in_bounds(goal.0 as i64, goal.1 as i64)
+        {
+            return None;
+        }
+        if start == goal {
+            return Some(vec![start]);
+        }
+
+        // Maps each reached cell to the cell it was reached from, which is how
+        // the walk is rebuilt once the goal turns up.
+        let mut came_from: HashMap<(usize, usize), (usize, usize)> = HashMap::new();
+        let mut queue = VecDeque::new();
+        came_from.insert(start, start);
+        queue.push_back(start);
+
+        while let Some((x, y)) = queue.pop_front() {
+            for (nx, ny, direction) in self.neighbors(x, y) {
+                if self.has_wall(x, y, direction) || came_from.contains_key(&(nx, ny)) {
+                    continue;
+                }
+                came_from.insert((nx, ny), (x, y));
+                if (nx, ny) == goal {
+                    return Some(self.rebuild_path(&came_from, start, goal));
+                }
+                queue.push_back((nx, ny));
+            }
+        }
+        None
+    }
+
+    /// Walks the `came_from` map backwards from `goal` to `start`.
+    fn rebuild_path(
+        &self,
+        came_from: &HashMap<(usize, usize), (usize, usize)>,
+        start: (usize, usize),
+        goal: (usize, usize),
+    ) -> Vec<(usize, usize)> {
+        let mut path = vec![goal];
+        let mut current = goal;
+        while current != start {
+            current = came_from[&current];
+            path.push(current);
+        }
+        path.reverse();
+        path
     }
 
     /// Parses a maze from the text format written by [`Map::save_to_file`].
@@ -508,6 +615,44 @@ impl Map {
         let text = fs::read_to_string(path)
             .map_err(|e| Error::new(e.kind(), format!("{}: {e}", path.display())))?;
         Map::from_ascii(&text).map_err(|e| Error::new(e.kind(), format!("{}: {e}", path.display())))
+    }
+}
+
+/// Which cells of a maze a rendered path covers, and how to draw them.
+///
+/// The path is stored as a set so rendering a row can ask about a cell without
+/// scanning the path again.
+struct PathMark {
+    cells: HashSet<(usize, usize)>,
+    start: (usize, usize),
+    goal: (usize, usize),
+}
+
+impl PathMark {
+    fn new(path: &[(usize, usize)]) -> Self {
+        PathMark {
+            cells: path.iter().copied().collect(),
+            start: path[0],
+            goal: path[path.len() - 1],
+        }
+    }
+
+    /// The two interior characters of cell `(x, y)`, or `None` to leave it
+    /// blank.
+    ///
+    /// Endpoints keep their letter and a leading space so they read as `S` and
+    /// `E` rather than the doubled `SS` a repeated character would give.
+    fn interior(&self, x: usize, y: usize) -> Option<String> {
+        let cell = (x, y);
+        if cell == self.start {
+            Some("S ".to_string())
+        } else if cell == self.goal {
+            Some("E ".to_string())
+        } else if self.cells.contains(&cell) {
+            Some("..".to_string())
+        } else {
+            None
+        }
     }
 }
 
@@ -736,5 +881,134 @@ mod tests {
         assert!(!map.is_solvable());
         assert!(!map.is_perfect());
         assert_eq!(map.to_ascii(), "");
+    }
+
+    /// Walks a 3x2 maze along the bottom row and up the right column, which is
+    /// the only route between the corners.
+    fn three_by_two_corridor() -> Map {
+        let mut map = Map::new(3, 2);
+        map.carve(0, 0, Direction::South);
+        map.carve(0, 1, Direction::East);
+        map.carve(1, 1, Direction::East);
+        map
+    }
+
+    #[test]
+    fn solve_finds_the_known_route() {
+        let map = three_by_two_corridor();
+        assert_eq!(map.solve(), Some(vec![(0, 0), (0, 1), (1, 1), (2, 1)]));
+    }
+
+    #[test]
+    fn a_single_cell_maze_is_solved_by_standing_still() {
+        let map = Map::new(1, 1);
+        assert_eq!(map.solve(), Some(vec![(0, 0)]));
+    }
+
+    #[test]
+    fn an_unreachable_exit_has_no_route() {
+        // The exit is sealed off: nothing is carved next to it.
+        let mut map = Map::new(3, 3);
+        map.carve(0, 0, Direction::East);
+        map.carve(1, 0, Direction::South);
+        assert!(!map.is_solvable());
+        assert_eq!(map.solve(), None);
+    }
+
+    #[test]
+    fn path_between_reports_out_of_bounds_endpoints() {
+        let map = three_by_two_corridor();
+        assert_eq!(map.path_between((0, 0), (9, 9)), None);
+        assert_eq!(map.path_between((9, 9), (0, 0)), None);
+    }
+
+    #[test]
+    fn path_between_a_cell_and_itself_is_that_cell() {
+        let map = three_by_two_corridor();
+        assert_eq!(map.path_between((1, 1), (1, 1)), Some(vec![(1, 1)]));
+    }
+
+    /// Every step of a returned route must cross a removed wall, otherwise the
+    /// solver is drawing a line through the maze rather than walking it.
+    fn assert_route_is_walkable(map: &Map, route: &[(usize, usize)]) {
+        for pair in route.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            let dx = to.0 as i64 - from.0 as i64;
+            let dy = to.1 as i64 - from.1 as i64;
+            let direction = match (dx, dy) {
+                (-1, 0) => Direction::West,
+                (1, 0) => Direction::East,
+                (0, -1) => Direction::North,
+                (0, 1) => Direction::South,
+                _ => panic!("{from:?} and {to:?} are not neighbours"),
+            };
+            assert!(
+                !map.has_wall(from.0, from.1, direction),
+                "the route crosses a wall between {from:?} and {to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn solved_routes_only_walk_through_openings() {
+        for name in crate::ALGORITHMS {
+            let generator = crate::Generator::new(14, 11, name, Some(3)).expect("known algorithm");
+            let map = generator.algorithm.generate_maze(14, 11);
+            let route = map.solve().expect("a perfect maze is solvable");
+            assert_eq!(route.first(), Some(&(0, 0)), "{name} start");
+            assert_eq!(route.last(), Some(&(13, 10)), "{name} goal");
+            assert_route_is_walkable(&map, &route);
+        }
+    }
+
+    #[test]
+    fn a_solved_route_never_visits_a_cell_twice() {
+        let generator = crate::Generator::new(15, 12, "eller", Some(9)).expect("known algorithm");
+        let map = generator.algorithm.generate_maze(15, 12);
+        let route = map.solve().expect("a perfect maze is solvable");
+        let unique: HashSet<(usize, usize)> = route.iter().copied().collect();
+        assert_eq!(unique.len(), route.len(), "the route contains a cycle");
+    }
+
+    #[test]
+    fn rendering_a_path_marks_the_route() {
+        let map = three_by_two_corridor();
+        let route = map.solve().expect("the corridor is solvable");
+        assert_eq!(
+            map.to_ascii_with_path(&route),
+            "+--+--+--+
+|S |  |  |
++  +--+--+
+|.. .. E |
++--+--+--+"
+        );
+    }
+
+    #[test]
+    fn rendering_an_empty_path_is_the_plain_maze() {
+        let map = three_by_two_corridor();
+        assert_eq!(map.to_ascii_with_path(&[]), map.to_ascii());
+    }
+
+    #[test]
+    fn rendering_a_path_leaves_the_walls_untouched() {
+        let map = three_by_two_corridor();
+        let route = map.solve().expect("the corridor is solvable");
+        let plain_text = map.to_ascii();
+        let marked_text = map.to_ascii_with_path(&route);
+        let plain: Vec<&str> = plain_text.lines().collect();
+        let marked: Vec<&str> = marked_text.lines().collect();
+        assert_eq!(plain.len(), marked.len());
+        for (index, (plain, marked)) in plain.iter().zip(&marked).enumerate() {
+            if index % 2 == 0 {
+                assert_eq!(plain, marked, "wall line {index} changed");
+            } else {
+                for (column, (plain, marked)) in plain.chars().zip(marked.chars()).enumerate() {
+                    if column % CELL_WIDTH == 0 {
+                        assert_eq!(plain, marked, "vertical wall at {index}:{column} changed");
+                    }
+                }
+            }
+        }
     }
 }
