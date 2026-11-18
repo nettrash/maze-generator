@@ -34,6 +34,6 @@ pub mod rng;
 pub use algorithm::abstraction::AlgorithmAbstraction;
 pub use algorithm::types::AlgorithmType;
 pub use error::MazeError;
-pub use generator::{ALGORITHMS, Generator};
+pub use generator::{ALGORITHMS, Generator, MazeOptions};
 pub use map::{Direction, Map};
 pub use rng::Rng;
