@@ -1,7 +1,7 @@
-use crate::maze::{
+use crate::{
     algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
     map::Map,
-    rng::Rng,
+    rng::{Rng, random_seed},
 };
 
 /// Recursive backtracker: a depth-first walk that carves as it advances and
@@ -10,24 +10,33 @@ use crate::maze::{
 /// It visits every cell exactly once, so the walls it removes form a spanning
 /// tree and the result is always a perfect maze.
 pub struct BacktrackingAlgorithm {
-    seed: Option<u64>,
+    seed: u64,
 }
 
 impl BacktrackingAlgorithm {
+    /// Creates the algorithm with a fresh random seed.
     pub fn new() -> Self {
-        BacktrackingAlgorithm { seed: None }
+        BacktrackingAlgorithm {
+            seed: random_seed(),
+        }
     }
 
-    /// Creates the algorithm with a fixed seed so its output is reproducible.
+    /// Creates the algorithm with a fixed seed, which makes the mazes it
+    /// produces reproducible.
     pub fn with_seed(seed: u64) -> Self {
-        BacktrackingAlgorithm { seed: Some(seed) }
+        BacktrackingAlgorithm { seed }
+    }
+
+    /// Creates the algorithm from an optional seed, falling back to a fresh
+    /// random one when none is given.
+    pub fn with_seed_or_random(seed: Option<u64>) -> Self {
+        BacktrackingAlgorithm {
+            seed: seed.unwrap_or_else(random_seed),
+        }
     }
 
     fn rng(&self) -> Rng {
-        match self.seed {
-            Some(seed) => Rng::new(seed),
-            None => Rng::from_entropy(),
-        }
+        Rng::new(self.seed)
     }
 }
 
@@ -40,6 +49,10 @@ impl Default for BacktrackingAlgorithm {
 impl AlgorithmAbstraction for BacktrackingAlgorithm {
     fn get_algorithm_type(&self) -> AlgorithmType {
         AlgorithmType::Backtracking
+    }
+
+    fn seed(&self) -> u64 {
+        self.seed
     }
 
     fn generate_maze(&self, width: u64, height: u64) -> Map {
@@ -75,7 +88,7 @@ impl AlgorithmAbstraction for BacktrackingAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::BacktrackingAlgorithm;
-    use crate::maze::algorithm::abstraction::AlgorithmAbstraction;
+    use crate::algorithm::abstraction::AlgorithmAbstraction;
 
     #[test]
     fn generates_a_perfect_maze() {

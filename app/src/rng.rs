@@ -1,27 +1,43 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Draws a seed from the system clock.
+///
+/// Split out from [`Rng::from_entropy`] so a caller that has to hand the same
+/// seed to several generators (the CLI does this to report it afterwards) can
+/// pick it once.
+pub fn random_seed() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x2545_F491_4F6C_DD1D)
+}
+
 /// Small, fast, deterministic pseudo-random generator (splitmix64).
 ///
 /// It is seeded either from the system clock ([`Rng::from_entropy`]) for real
 /// runs or from a fixed seed ([`Rng::new`]) so algorithm output can be made
 /// reproducible in tests.
 pub struct Rng {
+    seed: u64,
     state: u64,
 }
 
 impl Rng {
     /// Creates a generator from an explicit seed.
     pub fn new(seed: u64) -> Self {
-        Rng { state: seed }
+        Rng { seed, state: seed }
     }
 
     /// Creates a generator seeded from the current system time.
     pub fn from_entropy() -> Self {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x2545_F491_4F6C_DD1D);
-        Rng::new(seed)
+        Rng::new(random_seed())
+    }
+
+    /// The seed this generator started from.
+    ///
+    /// Reporting it lets a run be replayed exactly with [`Rng::new`].
+    pub fn seed(&self) -> u64 {
+        self.seed
     }
 
     fn next_u64(&mut self) -> u64 {

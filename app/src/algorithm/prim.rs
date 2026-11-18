@@ -1,7 +1,7 @@
-use crate::maze::{
+use crate::{
     algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
     map::{Direction, Map},
-    rng::Rng,
+    rng::{Rng, random_seed},
 };
 
 /// Randomised Prim's algorithm.
@@ -12,24 +12,33 @@ use crate::maze::{
 /// not in the maze before, so the removed walls form a spanning tree and the
 /// maze is perfect.
 pub struct PrimAlgorithm {
-    seed: Option<u64>,
+    seed: u64,
 }
 
 impl PrimAlgorithm {
+    /// Creates the algorithm with a fresh random seed.
     pub fn new() -> Self {
-        PrimAlgorithm { seed: None }
+        PrimAlgorithm {
+            seed: random_seed(),
+        }
     }
 
-    /// Creates the algorithm with a fixed seed so its output is reproducible.
+    /// Creates the algorithm with a fixed seed, which makes the mazes it
+    /// produces reproducible.
     pub fn with_seed(seed: u64) -> Self {
-        PrimAlgorithm { seed: Some(seed) }
+        PrimAlgorithm { seed }
+    }
+
+    /// Creates the algorithm from an optional seed, falling back to a fresh
+    /// random one when none is given.
+    pub fn with_seed_or_random(seed: Option<u64>) -> Self {
+        PrimAlgorithm {
+            seed: seed.unwrap_or_else(random_seed),
+        }
     }
 
     fn rng(&self) -> Rng {
-        match self.seed {
-            Some(seed) => Rng::new(seed),
-            None => Rng::from_entropy(),
-        }
+        Rng::new(self.seed)
     }
 }
 
@@ -42,6 +51,10 @@ impl Default for PrimAlgorithm {
 impl AlgorithmAbstraction for PrimAlgorithm {
     fn get_algorithm_type(&self) -> AlgorithmType {
         AlgorithmType::Prim
+    }
+
+    fn seed(&self) -> u64 {
+        self.seed
     }
 
     fn generate_maze(&self, width: u64, height: u64) -> Map {
@@ -79,7 +92,7 @@ impl AlgorithmAbstraction for PrimAlgorithm {
 #[cfg(test)]
 mod tests {
     use super::PrimAlgorithm;
-    use crate::maze::algorithm::abstraction::AlgorithmAbstraction;
+    use crate::algorithm::abstraction::AlgorithmAbstraction;
 
     #[test]
     fn generates_a_perfect_maze() {
