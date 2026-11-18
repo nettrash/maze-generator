@@ -15,6 +15,9 @@ maze --command generate --width 20 --height 10 --algorithm eller --output maze.t
 # Verify a saved maze
 maze --command check --input maze.txt
 
+# Print a maze with its solution path drawn on it
+maze --command solve --input maze.txt
+
 # Reproduce a maze you liked
 maze --command generate --width 20 --height 10 --algorithm wilson --seed 42
 ```
@@ -22,6 +25,14 @@ maze --command generate --width 20 --height 10 --algorithm wilson --seed 42
 Available algorithms: `backtracking`, `prim`, `kruskal`, `aldous_broder`,
 `wilson`, `eller`. All of them produce a perfect maze, meaning exactly one path
 connects any two cells.
+
+## Solving a maze
+
+Because a perfect maze has exactly one route between two cells, `solve` prints
+that route rather than a choice of routes. The entrance is marked `S`, the exit
+`E`, and the corridors in between with `.`. The number of steps is reported
+afterwards. A maze whose exit has been sealed off is printed unsolved and the
+command exits with a failure status.
 
 ## Reproducible mazes
 
