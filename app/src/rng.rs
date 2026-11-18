@@ -1,15 +1,32 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Mixed into the clock so two seeds drawn in the same tick still differ.
+static SEED_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Draws a seed from the system clock.
 ///
 /// Split out from [`Rng::from_entropy`] so a caller that has to hand the same
 /// seed to several generators (the CLI does this to report it afterwards) can
 /// pick it once.
+///
+/// A counter is mixed with the clock because the clock is not always precise
+/// enough to distinguish two calls made back to back, and two runs that shared
+/// a seed would silently produce the same maze.
 pub fn random_seed() -> u64 {
-    SystemTime::now()
+    let clock = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x2545_F491_4F6C_DD1D)
+        .unwrap_or(0x2545_F491_4F6C_DD1D);
+    let counter = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Splitmix64 of the sum, so neighbouring counter values spread apart
+    // instead of differing by one.
+    let mut z = clock
+        .wrapping_add(counter.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 /// Small, fast, deterministic pseudo-random generator (splitmix64).
@@ -69,7 +86,14 @@ impl Rng {
 
 #[cfg(test)]
 mod tests {
-    use super::Rng;
+    use super::{Rng, random_seed};
+
+    #[test]
+    fn random_seeds_do_not_repeat() {
+        let seeds: Vec<u64> = (0..1000).map(|_| random_seed()).collect();
+        let unique: std::collections::HashSet<u64> = seeds.iter().copied().collect();
+        assert_eq!(unique.len(), seeds.len(), "two runs shared a seed");
+    }
 
     #[test]
     fn deterministic_for_same_seed() {
