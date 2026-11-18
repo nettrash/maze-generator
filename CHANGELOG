@@ -1,1 +1,8 @@
 v0.0.1
+            - Features
+              * Maze Generation with Backtracking Algorithm.
+              * Maze Generation with Prim's Algorithm.
+              * Maze Generation with Kruskal's Algorithm.
+              * Maze Generation with Aldous-Broder Algorithm.
+              * Maze Generation with Wilson's Algorithm.
+              * Maze Generation with Eller's Algorithm.
