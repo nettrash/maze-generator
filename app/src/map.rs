@@ -754,11 +754,9 @@ impl Map {
                                 "art line {row}: format version {version} requires a solid outer border"
                             )));
                         }
-                    } else {
-                        if a == '-' {
-                            *map.cell_mut(x, y - 1) |= WALL_SOUTH;
-                            *map.cell_mut(x, y) |= WALL_NORTH;
-                        }
+                    } else if a == '-' {
+                        *map.cell_mut(x, y - 1) |= WALL_SOUTH;
+                        *map.cell_mut(x, y) |= WALL_NORTH;
                     }
                 }
             } else {

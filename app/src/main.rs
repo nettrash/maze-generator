@@ -239,7 +239,7 @@ fn intro() {
     let year_str = if year == 2026 {
         "2026".to_string()
     } else {
-        format!("2026-{}", year)
+        format!("2026-{year}")
     };
     println!("(c) {year_str} nettrash. All rights reserved.");
     println!("This program is licensed under the MIT License.");
