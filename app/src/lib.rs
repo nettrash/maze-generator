@@ -3,8 +3,8 @@
 //! The crate is split into a library (this file) and a thin command line
 //! binary. The interesting parts are:
 //!
-//! - [`Map`] — the in-memory maze, its wall queries, its validation predicates
-//!   and its text file format.
+//! - [`Map`] — the in-memory maze, its wall queries, its validation predicates,
+//!   its solver and its text file format.
 //! - [`algorithm`] — the [`AlgorithmAbstraction`] trait and the six concrete
 //!   generators.
 //! - [`Generator`] — picks an algorithm by name and runs it.
@@ -17,6 +17,9 @@
 //! let generator = Generator::new(8, 6, "backtracking", None)?;
 //! let map = generator.generate().await?;
 //! assert!(map.is_perfect());
+//! // A perfect maze has exactly one route from the entrance to the exit.
+//! let route = map.solve().expect("a perfect maze is solvable");
+//! assert_eq!(route.first(), Some(&(0, 0)));
 //! # Ok(())
 //! # }
 //! # tokio::runtime::Runtime::new().unwrap().block_on(run()).unwrap();
