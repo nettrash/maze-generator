@@ -134,16 +134,10 @@ impl Generator {
 
     /// Runs the algorithm and applies the requested variants.
     ///
-    /// Kept for callers that already await; it is [`Generator::build`] under
-    /// the hood and has never needed a runtime. New callers should use
-    /// [`Generator::build`], which says so in its signature.
-    pub async fn generate(&self) -> Result<Map, MazeError> {
-        Ok(self.build())
-    }
-
-    /// Runs the algorithm and applies the requested variants.
-    ///
     /// This is the entry point for callers that want the maze and nothing else.
+    /// Generation is CPU-bound and synchronous, so there is no runtime to
+    /// arrange: an earlier `async fn generate()` wrapped this call and forced
+    /// every consumer onto a tokio runtime for nothing.
     /// It prints nothing: a library that writes to stdout corrupts the output
     /// of whoever uses it, so progress reporting belongs to the command line
     /// binary, which has [`Generator::seed`] and the sizes to report.
@@ -172,17 +166,14 @@ mod tests {
 
     /// Every algorithm must return a perfect, solvable maze of the requested
     /// size, including the degenerate one-cell and single-row shapes.
-    #[tokio::test]
-    async fn all_algorithms_generate_perfect_mazes() {
+    #[test]
+    fn all_algorithms_generate_perfect_mazes() {
         let sizes = [(1u64, 1u64), (1, 7), (6, 1), (9, 6), (12, 10)];
 
         for name in ALGORITHMS {
             for (width, height) in sizes {
                 let generator = Generator::new(width, height, name, None).expect("known algorithm");
-                let map = generator
-                    .generate()
-                    .await
-                    .expect("generation should not fail");
+                let map = generator.build();
                 assert_eq!(map.width(), width, "{name} width at {width}x{height}");
                 assert_eq!(map.height(), height, "{name} height at {width}x{height}");
                 assert!(
@@ -224,19 +215,15 @@ mod tests {
 
     /// Reproducibility is the whole point of `--seed`, so it is checked for
     /// every algorithm rather than just one.
-    #[tokio::test]
-    async fn every_algorithm_reproduces_itself_from_its_seed() {
+    #[test]
+    fn every_algorithm_reproduces_itself_from_its_seed() {
         for name in ALGORITHMS {
             let first = Generator::new(12, 9, name, Some(7))
                 .expect("known algorithm")
-                .generate()
-                .await
-                .expect("generation succeeds");
+                .build();
             let second = Generator::new(12, 9, name, Some(7))
                 .expect("known algorithm")
-                .generate()
-                .await
-                .expect("generation succeeds");
+                .build();
             assert_eq!(
                 first.to_ascii(),
                 second.to_ascii(),
@@ -245,19 +232,15 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_different_seed_produces_a_different_maze() {
+    #[test]
+    fn a_different_seed_produces_a_different_maze() {
         for name in ALGORITHMS {
             let first = Generator::new(12, 9, name, Some(7))
                 .expect("known algorithm")
-                .generate()
-                .await
-                .expect("generation succeeds");
+                .build();
             let second = Generator::new(12, 9, name, Some(8))
                 .expect("known algorithm")
-                .generate()
-                .await
-                .expect("generation succeeds");
+                .build();
             assert_ne!(
                 first.to_ascii(),
                 second.to_ascii(),

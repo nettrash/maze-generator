@@ -3,11 +3,11 @@
 
 use maze::{ALGORITHMS, AlgorithmType, Direction, Generator, Map, MazeError, MazeOptions, Rng};
 
-#[tokio::test]
-async fn every_algorithm_builds_a_perfect_solvable_maze() {
+#[test]
+fn every_algorithm_builds_a_perfect_solvable_maze() {
     for name in ALGORITHMS {
         let generator = Generator::new(11, 7, name, None).expect("known algorithm");
-        let map = generator.generate().await.expect("generation failed");
+        let map = generator.build();
         assert_eq!(map.width(), 11, "{name} width");
         assert_eq!(map.height(), 7, "{name} height");
         assert!(map.is_perfect(), "{name} produced an imperfect maze");
@@ -15,8 +15,8 @@ async fn every_algorithm_builds_a_perfect_solvable_maze() {
     }
 }
 
-#[tokio::test]
-async fn generated_mazes_survive_a_save_and_load_round_trip() {
+#[test]
+fn generated_mazes_survive_a_save_and_load_round_trip() {
     let dir = std::env::temp_dir().join("maze-integration-round-trip");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -24,9 +24,7 @@ async fn generated_mazes_survive_a_save_and_load_round_trip() {
         let path = dir.join(format!("{name}.maze"));
         let original = Generator::new(9, 6, name, None)
             .expect("known algorithm")
-            .generate()
-            .await
-            .unwrap();
+            .build();
         original.save_to_file(&path).unwrap();
 
         let loaded = Map::load_from_file(&path).unwrap();
@@ -66,11 +64,11 @@ fn rng_is_reproducible_from_a_seed() {
     assert_ne!(draw(42), draw(43));
 }
 
-#[tokio::test]
-async fn every_algorithm_solves_its_own_maze() {
+#[test]
+fn every_algorithm_solves_its_own_maze() {
     for name in ALGORITHMS {
         let generator = Generator::new(13, 8, name, Some(5)).expect("known algorithm");
-        let map = generator.generate().await.expect("generation failed");
+        let map = generator.build();
 
         let route = map
             .solve()
@@ -101,8 +99,8 @@ async fn every_algorithm_solves_its_own_maze() {
     }
 }
 
-#[tokio::test]
-async fn a_maze_with_a_sealed_exit_is_reported_as_unsolvable() {
+#[test]
+fn a_maze_with_a_sealed_exit_is_reported_as_unsolvable() {
     let mut map = Map::new(3, 3);
     map.carve(0, 0, Direction::East);
     map.carve(1, 0, Direction::South);
@@ -142,11 +140,11 @@ fn algorithm_type_names_match_the_cli_spellings() {
     }
 }
 
-#[tokio::test]
-async fn every_algorithm_exports_valid_svg() {
+#[test]
+fn every_algorithm_exports_valid_svg() {
     for name in ALGORITHMS {
         let generator = Generator::new(7, 5, name, Some(11)).expect("known algorithm");
-        let map = generator.generate().await.expect("generation failed");
+        let map = generator.build();
         let svg = map.to_svg();
 
         assert!(svg.starts_with("<svg "), "{name} produced no SVG root");
@@ -163,16 +161,14 @@ async fn every_algorithm_exports_valid_svg() {
     }
 }
 
-#[tokio::test]
-async fn svg_export_round_trips_to_disk() {
+#[test]
+fn svg_export_round_trips_to_disk() {
     let dir = std::env::temp_dir().join("maze-integration-svg");
     std::fs::create_dir_all(&dir).unwrap();
 
     let map = Generator::new(6, 4, "kruskal", Some(2))
         .expect("known algorithm")
-        .generate()
-        .await
-        .unwrap();
+        .build();
 
     let path = dir.join("maze.svg");
     map.save_svg_to_file(&path).unwrap();
@@ -192,8 +188,8 @@ async fn svg_export_round_trips_to_disk() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-#[tokio::test]
-async fn braided_mazes_have_no_dead_ends_and_stay_connected() {
+#[test]
+fn braided_mazes_have_no_dead_ends_and_stay_connected() {
     for name in ALGORITHMS {
         let map = Generator::new(14, 10, name, Some(21))
             .expect("known algorithm")
@@ -213,8 +209,8 @@ async fn braided_mazes_have_no_dead_ends_and_stay_connected() {
     }
 }
 
-#[tokio::test]
-async fn entrance_and_exit_openings_survive_a_round_trip() {
+#[test]
+fn entrance_and_exit_openings_survive_a_round_trip() {
     let dir = std::env::temp_dir().join("maze-integration-variants");
     std::fs::create_dir_all(&dir).unwrap();
 

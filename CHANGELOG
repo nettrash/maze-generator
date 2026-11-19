@@ -1,35 +1,10 @@
 Unreleased
             - Quality
-              * The Rust toolchain is pinned in rust-toolchain.toml, so a local
-                build and CI use the same compiler version and cannot drift
-                apart.
-              * Clippy runs with `-D warnings`, so a new lint fails the build
-                instead of passing quietly until the next toolchain bump.
-            - Performance
-              * The grid is stored as one flat row-major allocation instead of
-                a vector of rows, so reading a cell is a single index.
-              * Walking a cell's neighbours no longer allocates: it fills a
-                fixed-size array, which is what every generation algorithm
-                does at every step.
-              * Verifying and solving a maze index a flat table by cell rather
-                than hashing coordinates, which is about nine times faster.
-              * The `check` command counts dead ends directly instead of
-                building the list to take its length.
-            - Fixed
-              * `--width 0` and `--height 0` are rejected instead of printing
-                an empty maze and exiting 0, so a script can tell that no maze
-                was produced.
-              * A maze bigger than 25 million cells is refused before anything
-                is allocated, with the cell count and the limit in the message.
-                `--width 100000 --height 100000` used to run until memory ran
-                out; it now fails immediately.
-              * The banner, progress and summary lines go to stderr, so stdout
-                carries only the maze and the `check` verdicts and can be
-                redirected to a file.
-              * The library no longer prints. The progress line moved to the
-                command line tool, which leaves `Generator` silent for anyone
-                using it as a crate.
-v0.0.1 - 2026-11-18
+              * Pinned the toolchain to 1.100.0 in `rust-toolchain.toml`, the
+                Dockerfile base image and `rust-version`, and added the
+                `rust-analyzer` component so the editor uses the pinned
+                compiler's own analyzer rather than a mismatched bundled one.
+v0.0.1 - 2026-11-19
             - First release.
             - Features
               * Maze Generation with Backtracking Algorithm.
@@ -50,11 +25,89 @@ v0.0.1 - 2026-11-18
               * SVG export for printing and sharing.
               * Braided mazes (`--braid`) and entrance/exit openings
                 (`--entrance-exit`).
+              * `list` command, printing the algorithm names the tool accepts so
+                a script can enumerate them instead of scraping the help text.
+              * `--algorithm random`, which lets the tool choose and reports the
+                pick; the choice comes from the seed, so the run stays
+                reproducible.
+              * `--json` prints one machine-readable object for `check`, `solve`,
+                `list` and `generate`, which is how a script reads the seed, the
+                step count and the verdicts without parsing prose.
+              * `--quiet` drops the banner, the progress line and the "saved to"
+                notes; `--json` implies it.
+              * `--input -` reads a maze from stdin and `--output -` writes one
+                to stdout, so `maze --command generate --output - | maze
+                --command solve --input -` works.
+              * `check --strict`, which additionally fails when the maze is not
+                perfect. Without it a braided maze passes, because a braided
+                maze is valid; with it, loops are the failure the caller asked
+                to hear about.
+              * Prebuilt binaries published with the release for Linux and macOS
+                on `x86_64` and `arm64`, and for Windows on `x86_64`, so the tool
+                is usable without a Rust toolchain or Docker.
             - Quality
               * Unit, integration and property-based tests; the property tests
                 check every algorithm at random sizes including the degenerate
                 1x1, 1xN and Nx1 shapes.
+              * Command line tests in `app/tests/cli.rs` drive the built binary
+                and pin the exit status of every command, which stream each
+                message belongs to, the `--json` objects, the pipes and the
+                messages for bad usage. They need no dependency beyond the
+                standard library.
               * Criterion benchmarks for generation, the variants, the map hot
                 paths and file I/O.
               * Continuous integration runs format, clippy, build and test.
-              * Docker image published for `nettrash/maze`.
+              * A version tag also publishes the prebuilt binaries, built
+                `--locked` from the committed `Cargo.lock`, and the smoke-tested
+                native targets are run once before upload.
+              * Clippy runs with `-D warnings`, so a new lint fails the build
+                instead of passing quietly until the next toolchain bump.
+              * Documentation builds with `-D warnings` in CI, so a broken
+                intra-doc link or a doc example that stopped compiling fails the
+                build, and the doc examples run as tests.
+              * The Rust toolchain is pinned in rust-toolchain.toml, so a local
+                build and CI use the same compiler version and cannot drift
+                apart. `Cargo.toml` now repeats that floor as `rust-version` and
+                carries the metadata a publishable crate needs.
+              * The library is synchronous through and through: `Generator`
+                builds its maze in a plain method rather than an `async fn` that
+                never awaited, so neither the crate nor the binary needs a
+                runtime. Dropping tokio and chrono leaves `clap` as the only
+                dependency and the runtime tree goes from 51 crates to 24.
+              * The Dockerfile installs no more `pkg-config`, `libssl-dev`,
+                `libpq-dev`, `libpq5` or `libssl3`, none of which anything in the
+                dependency tree needs; builds with `--locked` so an image can
+                only ever use the reviewed `Cargo.lock`; and the service account
+                gets `nologin` rather than a bash that a slim image has never
+                had.
+            - Performance
+              * The grid is stored as one flat row-major allocation instead of
+                a vector of rows, so reading a cell is a single index.
+              * Walking a cell's neighbours no longer allocates: it fills a
+                fixed-size array, which is what every generation algorithm
+                does at every step.
+              * Verifying and solving a maze index a flat table by cell rather
+                than hashing coordinates, which is about nine times faster.
+              * The `check` command counts dead ends directly instead of
+                building the list to take its length.
+            - Fixed
+              * `--width 0` and `--height 0` are rejected instead of printing
+                an empty maze and exiting 0, so a script can tell that no maze
+                was produced.
+              * A maze bigger than 25 million cells is refused before anything
+                is allocated, with the cell count and the limit in the message.
+                `--width 100000 --height 100000` used to run until memory ran
+                out; it now fails immediately.
+              * `check` exits with a failure status when the maze cannot be
+                solved, having reported `Solvable: false` and still exited 0.
+                Scripts can gate on it now, and it agrees with `solve`, which
+                always failed on the same maze.
+              * The banner, progress and summary lines go to stderr, so stdout
+                carries only the maze and the `check` verdicts and can be
+                redirected to a file.
+              * The library no longer prints. The progress line moved to the
+                command line tool, which leaves `Generator` silent for anyone
+                using it as a crate.
+              * The copyright year in the banner is a constant kept in step with
+                `LICENSE`, rather than a clock reading that printed a backwards
+                range on a machine set before the founding year.

@@ -13,16 +13,12 @@
 //! ```
 //! use maze::Generator;
 //!
-//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let generator = Generator::new(8, 6, "backtracking", None)?;
-//! let map = generator.generate().await?;
+//! let generator = Generator::new(8, 6, "backtracking", None).unwrap();
+//! let map = generator.build();
 //! assert!(map.is_perfect());
 //! // A perfect maze has exactly one route from the entrance to the exit.
 //! let route = map.solve().expect("a perfect maze is solvable");
 //! assert_eq!(route.first(), Some(&(0, 0)));
-//! # Ok(())
-//! # }
-//! # tokio::runtime::Runtime::new().unwrap().block_on(run()).unwrap();
 //! ```
 
 pub mod algorithm;
@@ -36,4 +32,4 @@ pub use algorithm::types::AlgorithmType;
 pub use error::MazeError;
 pub use generator::{ALGORITHMS, Generator, MazeOptions};
 pub use map::{Direction, Map};
-pub use rng::Rng;
+pub use rng::{Rng, random_seed};

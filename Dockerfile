@@ -1,11 +1,10 @@
-# Build stage
-FROM rust:1.88-slim AS builder
+# Build stage. The patch version matches rust-toolchain.toml, so the image is
+# built by the same compiler a local build and CI use.
+FROM rust:1.100.0-slim AS builder
 
-# Install system dependencies needed for building
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    libpq-dev \
+# ca-certificates is all the build needs. The dependency tree is clap alone, so
+# there is no OpenSSL to link against and no libpq to find with pkg-config.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,20 +15,19 @@ WORKDIR /usr/src/app
 COPY app/ ./
 
 # Build the application
-RUN cargo build --release
+# --locked builds from the committed Cargo.lock, so an image can never pick up
+# a dependency version that nobody reviewed.
+RUN cargo build --release --locked
 
 # Runtime stage
+# The binary needs nothing beyond the system C library, so there is no runtime
+# package to install here.
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    libpq5 \
-    libssl3 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
 # Create a non-root user
-RUN useradd -r -u 1000 -m -c "Maze user" -d /home/maze -s /bin/bash maze
+# nologin rather than bash: a service account needs no shell, and /bin/bash is
+# not installed in a slim image anyway.
+RUN useradd -r -u 1000 -m -c "Maze user" -d /home/maze -s /usr/sbin/nologin maze
 
 # Set work directory
 WORKDIR /home/maze

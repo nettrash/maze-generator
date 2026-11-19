@@ -45,6 +45,13 @@ jobs:
       run: 
         cd ${{ github.workspace }}/app ;
           cargo clippy --all-targets --all-features -- -D warnings
+    - name: Check documentation
+      # The crate ships as a library as well as a tool, so a broken intra-doc
+      # link or a doc example that stopped compiling is a build failure rather
+      # than a warning nobody reads. Doc examples are compiled and run.
+      run: 
+        cd ${{ github.workspace }}/app ;
+          RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
     - name: Build
       run: 
         cd ${{ github.workspace }}/app ;
@@ -127,3 +134,115 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
       continue-on-error: true
+
+  # Prebuilt binaries, so a release is usable without a Rust toolchain or
+  # Docker. Only a version tag publishes them; every other run stops at build
+  # and test.
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    strategy:
+      # A cross target that breaks should not take the platforms that still
+      # build down with it, so each one is allowed to fail on its own.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: maze
+            native: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary: maze
+            native: false
+            # The cross target needs a C compiler for the other architecture to
+            # link against.
+            packages: gcc-aarch64-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary: maze
+            native: true
+          - os: macos-14
+            target: x86_64-apple-darwin
+            binary: maze
+            native: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: maze.exe
+            native: true
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Read the pinned toolchain
+      # Same single source of truth as the build job.
+      id: pinned
+      shell: bash
+      run: >-
+        echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p'
+        "${{ github.workspace }}/rust-toolchain.toml")" >> "$GITHUB_OUTPUT"
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.pinned.outputs.channel }}
+        targets: ${{ matrix.target }}
+
+    - name: Install the cross linker
+      if: ${{ matrix.packages }}
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
+    - name: Build
+      shell: bash
+      run: |
+        cd "${{ github.workspace }}/app"
+        # --locked keeps a published binary on the reviewed Cargo.lock.
+        cargo build --release --locked --target "${{ matrix.target }}"
+
+    - name: Smoke test the binary
+      # Only the targets the runner can actually execute.
+      if: ${{ matrix.native }}
+      shell: bash
+      run: |
+        cd "${{ github.workspace }}/app"
+        "./target/${{ matrix.target }}/release/${{ matrix.binary }}" --version
+
+    - name: Package as a tarball
+      if: ${{ matrix.os != 'windows-latest' }}
+      shell: bash
+      run: |
+        cd "${{ github.workspace }}/app"
+        version="${GITHUB_REF_NAME#v}"
+        mkdir -p dist
+        tar -czf "dist/maze-$version-${{ matrix.target }}.tar.gz" \
+          -C "target/${{ matrix.target }}/release" maze
+
+    - name: Package as a zip
+      if: ${{ matrix.os == 'windows-latest' }}
+      shell: pwsh
+      run: |
+        Set-Location "${{ github.workspace }}/app"
+        $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
+        New-Item -ItemType Directory -Force dist | Out-Null
+        Compress-Archive -Path "target/${{ matrix.target }}/release/maze.exe" `
+          -DestinationPath "dist/maze-$version-${{ matrix.target }}.zip" -Force
+
+    - name: Publish the release assets
+      # The runner ships gh, so publishing needs no third-party action.
+      # --clobber lets a re-run of the same tag replace its assets instead of
+      # failing on the duplicate name.
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        cd "${{ github.workspace }}/app"
+        tag="${GITHUB_REF_NAME}"
+        gh release view "$tag" >/dev/null 2>&1 ||
+          gh release create "$tag" --title "Maze $tag" --verify-tag
+        gh release upload "$tag" dist/* --clobber
