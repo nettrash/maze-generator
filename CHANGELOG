@@ -1,9 +1,3 @@
-Unreleased
-            - Quality
-              * Pinned the toolchain to 1.100.0 in `rust-toolchain.toml`, the
-                Dockerfile base image and `rust-version`, and added the
-                `rust-analyzer` component so the editor uses the pinned
-                compiler's own analyzer rather than a mismatched bundled one.
 v0.0.1 - 2026-11-19
             - First release.
             - Features
@@ -57,6 +51,9 @@ v0.0.1 - 2026-11-19
               * Criterion benchmarks for generation, the variants, the map hot
                 paths and file I/O.
               * Continuous integration runs format, clippy, build and test.
+              * Docker image published for `nettrash/maze`, built for
+                `linux/amd64` and `linux/arm64` and tagged with the version, the
+                `major.minor` pair and `latest`.
               * A version tag also publishes the prebuilt binaries, built
                 `--locked` from the committed `Cargo.lock`, and the smoke-tested
                 native targets are run once before upload.
@@ -65,10 +62,13 @@ v0.0.1 - 2026-11-19
               * Documentation builds with `-D warnings` in CI, so a broken
                 intra-doc link or a doc example that stopped compiling fails the
                 build, and the doc examples run as tests.
-              * The Rust toolchain is pinned in rust-toolchain.toml, so a local
-                build and CI use the same compiler version and cannot drift
-                apart. `Cargo.toml` now repeats that floor as `rust-version` and
-                carries the metadata a publishable crate needs.
+              * The Rust toolchain is pinned to 1.100.0 in `rust-toolchain.toml`,
+                and the same version is repeated as `rust-version` in
+                `Cargo.toml` and as the base image in the Dockerfile, so a local
+                build, CI and the image all use one compiler. The file also asks
+                for the `rust-analyzer` component, so the editor runs the pinned
+                compiler's own analyzer rather than a mismatched bundled one, and
+                `Cargo.toml` carries the metadata a publishable crate needs.
               * The library is synchronous through and through: `Generator`
                 builds its maze in a plain method rather than an `async fn` that
                 never awaited, so neither the crate nor the binary needs a
