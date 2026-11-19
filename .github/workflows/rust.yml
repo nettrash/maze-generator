@@ -93,7 +93,12 @@ jobs:
         tags: |
           type=ref,event=branch
           type=ref,event=pr
-          type=sha,prefix={{branch}}-
+          # {{branch}} is empty when the event is a tag, which used to expand
+          # to the unpushable `nettrash/maze:-7ef7dc4` and make buildx reject
+          # the whole invocation, so no image was pushed at all. Each line now
+          # prefixes the sha with whatever the run actually has.
+          type=sha,prefix={{branch}}-,enable=${{ github.ref_type == 'branch' }}
+          type=sha,prefix={{tag}}-,enable=${{ github.ref_type == 'tag' }}
           type=raw,value=latest,enable={{is_default_branch}}
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
@@ -133,7 +138,9 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
-      continue-on-error: true
+      # Deliberately not continue-on-error: the 0.0.1 image was never pushed,
+      # yet the job and the run both called it green. A release whose image did
+      # not reach the registry has to redden the run.
 
   # Prebuilt binaries, so a release is usable without a Rust toolchain or
   # Docker. Only a version tag publishes them; every other run stops at build
@@ -243,6 +250,12 @@ jobs:
       run: |
         cd "${{ github.workspace }}/app"
         tag="${GITHUB_REF_NAME}"
+        notes="/tmp/maze-release-notes.md"
+        # The release page gets the newest CHANGELOG section: everything above
+        # the previous version heading.
+        awk '/^v[0-9]+\./{ if (++seen > 1) exit } { print }' \
+          "${{ github.workspace }}/CHANGELOG" > "$notes"
         gh release view "$tag" >/dev/null 2>&1 ||
-          gh release create "$tag" --title "Maze $tag" --verify-tag
+          gh release create "$tag" --title "Maze $tag" --verify-tag \
+            --notes-file "$notes"
         gh release upload "$tag" dist/* --clobber
