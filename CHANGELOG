@@ -1,3 +1,26 @@
+v0.0.2 - 2026-11-19
+            - Fixed
+              * A `v*` tag now publishes the versioned Docker image. On a tag
+                build the short-sha tag expanded to `nettrash/maze:-7ef7dc4`,
+                an invalid reference that made buildx refuse the whole
+                invocation, so `nettrash/maze:0.0.1` never existed and only
+                `latest` and the `master` tags did. The sha is prefixed by the
+                branch on a branch build and by the tag on a tag build, so
+                every tag the action generates is pushable.
+              * `aarch64-unknown-linux-gnu` links again in the release job. The
+                cross compiler was installed but never named, so the host `cc`
+                drove `rust-lld` in x86_64 emulation and the linker refused the
+                AArch64-only `--fix-cortex-a53-843419` flag rustc passes
+                itself. `app/.cargo/config.toml` points that target at
+                `aarch64-linux-gnu-gcc`, which a local cross build picks up
+                too.
+            - Quality
+              * The Docker push step no longer runs with `continue-on-error`,
+                so an image that never reaches the registry fails the run
+                instead of reporting the release green, which is how the
+                missing 0.0.1 image went unnoticed.
+              * A release the tag creates now carries the newest CHANGELOG
+                section as its notes, so the release page is not left empty.
 v0.0.1 - 2026-11-19
             - First release.
             - Features

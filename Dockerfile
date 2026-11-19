@@ -50,9 +50,9 @@ CMD ["maze", "--help"]
 # Metadata
 LABEL maintainer="nettrash" \
       description="Maze Generator - A tool for generating mazes" \
-      version="0.0.1" \
+      version="0.0.2" \
       org.opencontainers.image.title="maze" \
       org.opencontainers.image.description="Maze Generator" \
-      org.opencontainers.image.version="0.0.1" \
+      org.opencontainers.image.version="0.0.2" \
       org.opencontainers.image.source="https://github.com/nettrash/maze-generator" \
       org.opencontainers.image.licenses="MIT"

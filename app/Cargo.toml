@@ -1,6 +1,6 @@
 [package]
 name = "maze"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 # The version rust-toolchain.toml pins, so a too-old cargo is told so plainly
 # instead of failing on an edition or a lint it has never seen. Keep the two in

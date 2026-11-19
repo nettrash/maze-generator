@@ -1,0 +1,10 @@
+# The release job cross builds `aarch64-unknown-linux-gnu` (see
+# `.github/workflows/rust.yml`), which links with the other architecture's C
+# compiler. It has to be named: left to the host `cc`, the driver pins
+# `rust-lld` to x86_64 emulation and the linker then refuses the AArch64-only
+# `--fix-cortex-a53-843419` flag rustc passes itself.
+#
+# This only applies to a build that asks for the target, so a plain
+# `cargo build --release` never looks for the cross compiler.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
