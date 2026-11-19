@@ -45,6 +45,21 @@
 //! a version 1 file with a hole in its outer border is rejected. Newly written
 //! files use version 2.
 //!
+//! # Neighbours
+//!
+//! Three ways to walk a cell's neighbours, chosen by what the caller needs:
+//!
+//! - [`Map::each_neighbor`] iterates all of them, which is what the graph walks
+//!   in [`Map::is_perfect`] and [`Map::solve`] do.
+//! - [`Map::neighbor_count`] with [`Map::neighbor_at`] picks one at random
+//!   without building anything, which is what the random-walk algorithms do.
+//! - [`Map::neighbors`] hands back the packed array itself.
+//!
+//! All three agree, are allocation free, and count neighbours by position
+//! rather than by walls: a cell keeps its neighbours whether or not the wall
+//! between them still stands, since carving towards a walled neighbour is the
+//! whole point of asking.
+//!
 //! # Solving
 //!
 //! [`Map::solve`] returns the unique route from the top-left corner to the
@@ -57,7 +72,7 @@
 //! drawing for printing and sharing. It is a one-way export: only the text
 //! format described above is read back.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{BufWriter, Error, ErrorKind, Write};
@@ -156,8 +171,13 @@ impl Direction {
 pub struct Map {
     width: usize,
     height: usize,
-    /// `grid[y][x]` holds the wall bitmask of the cell at column `x`, row `y`.
-    grid: Vec<Vec<u8>>,
+    /// Row-major wall bitmasks: `grid[y * width + x]` holds the walls of the
+    /// cell at column `x`, row `y`.
+    ///
+    /// One flat allocation rather than one `Vec` per row, so walking the maze
+    /// in reading order stays cache friendly and every cell access is a single
+    /// bounds check instead of two.
+    grid: Vec<u8>,
 }
 
 impl Map {
@@ -171,7 +191,7 @@ impl Map {
         Map {
             width,
             height,
-            grid: vec![vec![WALLS_ALL; width]; height],
+            grid: vec![WALLS_ALL; Self::cells(width, height)],
         }
     }
 
@@ -184,8 +204,17 @@ impl Map {
         Map {
             width,
             height,
-            grid: vec![vec![0; width]; height],
+            grid: vec![0; Self::cells(width, height)],
         }
+    }
+
+    /// The length of the flat grid for a maze of this size.
+    ///
+    /// Saturating rather than wrapping: an absurd `width * height` should fail
+    /// loudly when the grid is allocated, not wrap to a small length that every
+    /// later cell access would panic on.
+    fn cells(width: usize, height: usize) -> usize {
+        width.saturating_mul(height)
     }
 
     /// The width of the maze in cells.
@@ -204,11 +233,11 @@ impl Map {
     }
 
     fn cell(&self, x: usize, y: usize) -> u8 {
-        self.grid[y][x]
+        self.grid[y * self.width + x]
     }
 
     fn cell_mut(&mut self, x: usize, y: usize) -> &mut u8 {
-        &mut self.grid[y][x]
+        &mut self.grid[y * self.width + x]
     }
 
     /// Whether the given coordinates fall inside the maze.
@@ -241,17 +270,83 @@ impl Map {
 
     /// The in-bounds neighbours of a cell together with the wall that separates
     /// them, used by the generation algorithms to pick where to carve next.
-    pub fn neighbors(&self, x: usize, y: usize) -> Vec<(usize, usize, Direction)> {
-        let mut result = Vec::with_capacity(4);
+    ///
+    /// The entries are packed at the front of the array and the rest are
+    /// `None`, so [`Map::neighbor_count`] says how many are usable and the
+    /// array can be indexed directly up to that count. It is a fixed array
+    /// rather than a `Vec` because this is the hottest call in every algorithm:
+    /// each of them asks for the neighbours of every cell it touches, and
+    /// allocating a `Vec` each time showed up in the benchmarks.
+    ///
+    /// A cell on the border simply has fewer entries; a cell outside the maze
+    /// has none.
+    pub fn neighbors(&self, x: usize, y: usize) -> [Option<(usize, usize, Direction)>; 4] {
+        let mut result = [None; 4];
         if x >= self.width || y >= self.height {
             return result;
         }
+        let mut index = 0;
         for direction in Direction::ALL {
             if let Some(neighbor) = self.neighbor(x, y, direction) {
-                result.push((neighbor.0, neighbor.1, direction));
+                result[index] = Some((neighbor.0, neighbor.1, direction));
+                index += 1;
             }
         }
         result
+    }
+
+    /// How many neighbours a cell has, which is four everywhere but on the
+    /// border.
+    ///
+    /// Cheaper than counting the entries of [`Map::neighbors`] because it only
+    /// looks at the position, never at the walls. Algorithms that want to pick
+    /// a neighbour at random ask for this and then index the array.
+    pub fn neighbor_count(&self, x: usize, y: usize) -> usize {
+        if x >= self.width || y >= self.height {
+            return 0;
+        }
+        let mut count = 0;
+        if y > 0 {
+            count += 1;
+        }
+        if x + 1 < self.width {
+            count += 1;
+        }
+        if y + 1 < self.height {
+            count += 1;
+        }
+        if x > 0 {
+            count += 1;
+        }
+        count
+    }
+
+    /// The `index`th neighbour of a cell, as returned by [`Map::neighbors`].
+    ///
+    /// `index` must be below [`Map::neighbor_count`]; the entries are packed at
+    /// the front of the array, so this is the indexed form the random-walk
+    /// algorithms want.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `index` is not below [`Map::neighbor_count`].
+    pub fn neighbor_at(&self, x: usize, y: usize, index: usize) -> (usize, usize, Direction) {
+        self.neighbors(x, y)[index].expect("index within neighbor_count")
+    }
+
+    /// Iterates over every neighbour of a cell together with the wall that
+    /// separates them.
+    ///
+    /// This is the convenient form when all neighbours are wanted, as the graph
+    /// walks in [`Map::is_perfect`] and [`Map::solve`] do. To pick one at random
+    /// without touching the walls, use [`Map::neighbor_count`] with
+    /// [`Map::neighbor_at`]. A cell outside the maze yields nothing.
+    pub fn each_neighbor(
+        &self,
+        x: usize,
+        y: usize,
+    ) -> impl Iterator<Item = (usize, usize, Direction)> {
+        self.neighbors(x, y).into_iter().flatten()
     }
 
     /// Removes the wall between a cell and its neighbour, returning whether the
@@ -323,6 +418,23 @@ impl Map {
         dead_ends
     }
 
+    /// How many cells are dead ends.
+    ///
+    /// The same walk as [`Map::dead_ends`] without building the list, for
+    /// callers that only want the number. On a maze with no walls that is the
+    /// difference between a `Vec` of every cell and no allocation at all.
+    pub fn dead_end_count(&self) -> usize {
+        let mut count = 0;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if self.passage_count(x, y) == 1 {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     /// How many of a cell's four sides are open, counting border openings.
     fn passage_count(&self, x: usize, y: usize) -> usize {
         Direction::ALL
@@ -392,24 +504,43 @@ impl Map {
         count
     }
 
-    /// The set of cells reachable from the top-left corner by walking through
-    /// removed walls.
-    fn reachable_from_origin(&self) -> HashSet<(usize, usize)> {
-        let mut seen = HashSet::new();
-        let mut queue = VecDeque::new();
-        seen.insert((0, 0));
-        queue.push_back((0, 0));
-        while let Some((x, y)) = queue.pop_front() {
-            for (nx, ny, direction) in self.neighbors(x, y) {
+    /// The cells reachable from the top-left corner by walking through removed
+    /// walls, as a flat bitmap indexed by `y * width + x`.
+    ///
+    /// A bitmap rather than a `HashSet<(usize, usize)>`: the walk touches every
+    /// cell in a full maze, and hashing a tuple per visit dominated the cost of
+    /// [`Map::is_perfect`] and [`Map::is_solvable`]. The stack is a `Vec` used
+    /// depth-first, since reachability does not care about the order.
+    fn reachable_bitmap(&self) -> Vec<bool> {
+        let cells = self.width * self.height;
+        let mut seen = vec![false; cells];
+        let mut stack = vec![0usize];
+        seen[0] = true;
+        while let Some(index) = stack.pop() {
+            let (x, y) = (index % self.width, index / self.width);
+            for (nx, ny, direction) in self.each_neighbor(x, y) {
                 if self.has_wall(x, y, direction) {
                     continue;
                 }
-                if seen.insert((nx, ny)) {
-                    queue.push_back((nx, ny));
+                let next = ny * self.width + nx;
+                if !seen[next] {
+                    seen[next] = true;
+                    stack.push(next);
                 }
             }
         }
         seen
+    }
+
+    /// How many cells can be reached from the top-left corner.
+    ///
+    /// Equal to the number of cells exactly when the maze is fully connected,
+    /// which is what [`Map::is_perfect`] checks.
+    pub fn reachable_count(&self) -> usize {
+        if self.is_empty() {
+            return 0;
+        }
+        self.reachable_bitmap().iter().filter(|&&seen| seen).count()
     }
 
     /// Whether the bottom-right corner can be reached from the top-left corner.
@@ -417,8 +548,8 @@ impl Map {
         if self.is_empty() {
             return false;
         }
-        self.reachable_from_origin()
-            .contains(&(self.width - 1, self.height - 1))
+        let goal = (self.height - 1) * self.width + (self.width - 1);
+        self.reachable_bitmap()[goal]
     }
 
     /// Whether the maze is *perfect*: exactly one path connects any two cells.
@@ -431,7 +562,7 @@ impl Map {
             return false;
         }
         let cells = self.width * self.height;
-        self.openings() == cells - 1 && self.reachable_from_origin().len() == cells
+        self.openings() == cells - 1 && self.reachable_count() == cells
     }
 
     /// Renders the horizontal wall line above row `y`.
@@ -632,40 +763,51 @@ impl Map {
             return Some(vec![start]);
         }
 
-        // Maps each reached cell to the cell it was reached from, which is how
-        // the walk is rebuilt once the goal turns up.
-        let mut came_from: HashMap<(usize, usize), (usize, usize)> = HashMap::new();
+        // Each reached cell records the cell it was reached from, which is how
+        // the walk is rebuilt once the goal turns up. Indexed by cell rather
+        // than keyed by coordinate: the walk can visit every cell, and hashing
+        // a tuple per visit dominated the cost of this function.
+        let cells = self.width * self.height;
+        let unvisited = usize::MAX;
+        let mut came_from = vec![unvisited; cells];
         let mut queue = VecDeque::new();
-        came_from.insert(start, start);
-        queue.push_back(start);
+        let start_index = start.1 * self.width + start.0;
+        let goal_index = goal.1 * self.width + goal.0;
+        came_from[start_index] = start_index;
+        queue.push_back(start_index);
 
-        while let Some((x, y)) = queue.pop_front() {
-            for (nx, ny, direction) in self.neighbors(x, y) {
-                if self.has_wall(x, y, direction) || came_from.contains_key(&(nx, ny)) {
+        while let Some(index) = queue.pop_front() {
+            let (x, y) = (index % self.width, index / self.width);
+            for (nx, ny, direction) in self.each_neighbor(x, y) {
+                if self.has_wall(x, y, direction) {
                     continue;
                 }
-                came_from.insert((nx, ny), (x, y));
-                if (nx, ny) == goal {
-                    return Some(self.rebuild_path(&came_from, start, goal));
+                let next = ny * self.width + nx;
+                if came_from[next] != unvisited {
+                    continue;
                 }
-                queue.push_back((nx, ny));
+                came_from[next] = index;
+                if next == goal_index {
+                    return Some(self.rebuild_path(&came_from, start_index, goal_index));
+                }
+                queue.push_back(next);
             }
         }
         None
     }
 
-    /// Walks the `came_from` map backwards from `goal` to `start`.
+    /// Walks the `came_from` table backwards from `goal` to `start`.
     fn rebuild_path(
         &self,
-        came_from: &HashMap<(usize, usize), (usize, usize)>,
-        start: (usize, usize),
-        goal: (usize, usize),
+        came_from: &[usize],
+        start_index: usize,
+        goal_index: usize,
     ) -> Vec<(usize, usize)> {
-        let mut path = vec![goal];
-        let mut current = goal;
-        while current != start {
-            current = came_from[&current];
-            path.push(current);
+        let mut path = vec![(goal_index % self.width, goal_index / self.width)];
+        let mut current = goal_index;
+        while current != start_index {
+            current = came_from[current];
+            path.push((current % self.width, current / self.width));
         }
         path.reverse();
         path
@@ -969,6 +1111,92 @@ mod tests {
     }
 
     #[test]
+    fn neighbors_packs_its_entries_at_the_front_of_the_array() {
+        // The indexed access the algorithms rely on is only correct while the
+        // Some entries come before the None ones.
+        let map = Map::new(3, 3);
+        for y in 0..3 {
+            for x in 0..3 {
+                let neighbors = map.neighbors(x, y);
+                let count = neighbors.iter().filter(|n| n.is_some()).count();
+                assert!(
+                    neighbors[..count].iter().all(Option::is_some),
+                    "({x},{y}) has a gap before its {count} entries"
+                );
+                assert!(
+                    neighbors[count..].iter().all(Option::is_none),
+                    "({x},{y}) has an entry after its {count} entries"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn neighbor_count_agrees_with_the_packed_array_everywhere() {
+        let map = Map::new(4, 3);
+        for y in 0..3 {
+            for x in 0..4 {
+                let count = map.neighbor_count(x, y);
+                let packed = map.neighbors(x, y);
+                assert_eq!(
+                    count,
+                    packed.iter().filter(|n| n.is_some()).count(),
+                    "neighbor_count disagrees with neighbors at ({x},{y})"
+                );
+                for (index, entry) in packed.iter().enumerate().take(count) {
+                    assert_eq!(
+                        map.neighbor_at(x, y, index),
+                        entry.expect("packed entry"),
+                        "neighbor_at disagrees with neighbors at ({x},{y})[{index}]"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn neighbor_count_follows_the_position_not_the_walls() {
+        // A cell keeps its neighbours whether or not the walls are standing,
+        // which is what lets the algorithms carve towards a walled neighbour.
+        let walled = Map::new(3, 3);
+        let mut open = Map::with_open_grid(3, 3);
+        assert!(open.carve(1, 1, Direction::North));
+        for (map, label) in [(&walled, "walled"), (&open, "open")] {
+            assert_eq!(map.neighbor_count(1, 1), 4, "{label} centre");
+            assert_eq!(map.neighbor_count(0, 0), 2, "{label} corner");
+            assert_eq!(map.neighbor_count(1, 0), 3, "{label} edge");
+        }
+    }
+
+    #[test]
+    fn neighbors_of_a_cell_outside_the_maze_is_empty() {
+        let map = Map::new(2, 2);
+        assert_eq!(map.neighbor_count(2, 0), 0);
+        assert_eq!(map.neighbor_count(0, 2), 0);
+        assert!(map.neighbors(5, 5).iter().all(Option::is_none));
+        assert_eq!(map.each_neighbor(5, 5).count(), 0);
+    }
+
+    #[test]
+    fn each_neighbor_yields_the_packed_entries_in_order() {
+        let map = Map::new(3, 3);
+        // Corners list two neighbours, and they come in Direction::ALL order.
+        assert_eq!(
+            map.each_neighbor(0, 0).collect::<Vec<_>>(),
+            vec![(1, 0, Direction::East), (0, 1, Direction::South)]
+        );
+        assert_eq!(
+            map.each_neighbor(2, 2).collect::<Vec<_>>(),
+            vec![(2, 1, Direction::North), (1, 2, Direction::West)]
+        );
+        for y in 0..3 {
+            for x in 0..3 {
+                assert_eq!(map.each_neighbor(x, y).count(), map.neighbor_count(x, y));
+            }
+        }
+    }
+
+    #[test]
     fn new_maze_keeps_every_wall_in_place() {
         let map = Map::new(3, 2);
         assert_eq!(map.width(), 3);
@@ -1179,6 +1407,34 @@ mod tests {
     }
 
     #[test]
+    fn dead_end_counts_agree_with_the_list() {
+        // The counting walk must not drift from the listing one: they are the
+        // same iterator, but `check` uses the count and tests use the list.
+        for name in crate::ALGORITHMS {
+            for seed in [1, 2, 3] {
+                let map = crate::Generator::new(13, 10, name, Some(seed))
+                    .expect("known algorithm")
+                    .build();
+                assert_eq!(
+                    map.dead_end_count(),
+                    map.dead_ends().len(),
+                    "{name} at seed {seed}"
+                );
+            }
+        }
+        // A corridor has exactly two cul-de-sacs, its ends.
+        let mut map = Map::new(3, 1);
+        map.carve(0, 0, Direction::East);
+        map.carve(1, 0, Direction::East);
+        assert_eq!(map.dead_end_count(), 2);
+        assert_eq!(map.dead_ends(), vec![(0, 0), (2, 0)]);
+        // With no walls at all nothing is a cul-de-sac.
+        let open = Map::with_open_grid(3, 3);
+        assert_eq!(open.dead_end_count(), 0);
+        assert!(open.dead_ends().is_empty());
+    }
+
+    #[test]
     fn a_plain_maze_keeps_its_dead_ends_and_its_border() {
         let map = perfect_maze(4);
         assert!(!map.dead_ends().is_empty(), "the fixture has no dead ends");
@@ -1210,7 +1466,7 @@ mod tests {
         assert!(map.is_solvable(), "braiding cut the exit off");
         assert!(map.solve().is_some());
         // Braiding only adds openings, so every cell is still reachable.
-        assert_eq!(map.reachable_from_origin().len(), 12 * 9);
+        assert_eq!(map.reachable_count(), 12 * 9);
     }
 
     #[test]
@@ -1471,6 +1727,70 @@ mod tests {
             assert_eq!(route.first(), Some(&(0, 0)), "{name} start");
             assert_eq!(route.last(), Some(&(13, 10)), "{name} goal");
             assert_route_is_walkable(&map, &route);
+        }
+    }
+
+    /// Exhaustively finds the shortest walkable route by depth-first search,
+    /// independent of the breadth-first solver being tested.
+    fn brute_force_shortest(map: &Map, goal: (usize, usize)) -> usize {
+        fn dfs(
+            map: &Map,
+            cell: (usize, usize),
+            goal: (usize, usize),
+            steps: usize,
+            visited: &mut Vec<bool>,
+            best: &mut usize,
+        ) {
+            if steps >= *best {
+                return;
+            }
+            if cell == goal {
+                *best = steps;
+                return;
+            }
+            let index = cell.1 * map.width() as usize + cell.0;
+            visited[index] = true;
+            for (nx, ny, direction) in map.each_neighbor(cell.0, cell.1) {
+                if map.has_wall(cell.0, cell.1, direction) {
+                    continue;
+                }
+                let next = ny * map.width() as usize + nx;
+                if !visited[next] {
+                    dfs(map, (nx, ny), goal, steps + 1, visited, best);
+                }
+            }
+            visited[index] = false;
+        }
+
+        let mut best = usize::MAX;
+        let mut visited = vec![false; map.width() as usize * map.height() as usize];
+        dfs(map, (0, 0), goal, 0, &mut visited, &mut best);
+        best
+    }
+
+    #[test]
+    fn solved_routes_are_the_shortest_possible() {
+        // The solver is breadth-first, so its route must be shortest even where
+        // a maze has loops and several routes exist. Brute force agrees on
+        // every algorithm, plain and braided.
+        for name in crate::ALGORITHMS {
+            for braid in [false, true] {
+                let generator = crate::Generator::new(9, 7, name, Some(5))
+                    .expect("known algorithm")
+                    .with_options(crate::MazeOptions {
+                        braid,
+                        entrance_exit: false,
+                    });
+                let map = generator.build();
+                let goal = (8, 6);
+                let route = map.solve().expect("generated mazes are solvable");
+                let expected = brute_force_shortest(&map, goal);
+                assert_eq!(
+                    route.len(),
+                    expected + 1,
+                    "{name} (braid {braid}) is not a shortest route"
+                );
+            }
         }
     }
 

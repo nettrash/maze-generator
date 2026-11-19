@@ -31,3 +31,6 @@ database.sql
 docker-compose.override.yml
 .env
 *.dump
+
+.claude/
+AGENTS.md

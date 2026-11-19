@@ -86,8 +86,9 @@ impl AlgorithmAbstraction for WilsonAlgorithm {
 
             let mut current = (index % w, index / w);
             while !in_maze[current.1 * w + current.0] {
-                let neighbors = map.neighbors(current.0, current.1);
-                let (nx, ny, direction) = neighbors[rng.below(neighbors.len() as u64) as usize];
+                let count = map.neighbor_count(current.0, current.1);
+                let (nx, ny, direction) =
+                    map.neighbor_at(current.0, current.1, rng.below(count as u64) as usize);
                 let from = current.1 * w + current.0;
                 if successor[from].is_none() {
                     touched.push(from);

@@ -2,7 +2,15 @@
 name = "maze"
 version = "0.0.1"
 edition = "2024"
+# The version rust-toolchain.toml pins, so a too-old cargo is told so plainly
+# instead of failing on an edition or a lint it has never seen. Keep the two in
+# step, together with the Dockerfile base image.
+rust-version = "1.100.0"
 license = "MIT"
+description = "Generate, verify, solve and export random mazes from six algorithms"
+repository = "https://github.com/nettrash/maze-generator"
+keywords = ["maze", "generator", "cli", "puzzle", "svg"]
+categories = ["command-line-utilities", "games"]
 
 [lib]
 name = "maze"
@@ -13,9 +21,12 @@ name = "maze"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-chrono = { version = "0.4.43", features = ["clock"] }
 clap = { version = "4.5.56", features = ["derive"] }
 
 [dev-dependencies]
 proptest = { version = "1.9", default-features = false, features = ["std"] }
+criterion = "0.8"
+
+[[bench]]
+name = "generation"
+harness = false
