@@ -17,6 +17,24 @@ pub enum MazeError {
         /// The name the user asked for.
         name: String,
     },
+    /// A maze cannot have no cells, so a dimension of zero is rejected rather
+    /// than quietly producing an empty maze that reports itself as generated.
+    EmptySize {
+        /// The width the user asked for.
+        width: u64,
+        /// The height the user asked for.
+        height: u64,
+    },
+    /// The maze is bigger than [`crate::generator::MAX_CELLS`], so building it
+    /// would be expected to exhaust memory or run for an unreasonable time.
+    TooLarge {
+        /// The width the user asked for.
+        width: u64,
+        /// The height the user asked for.
+        height: u64,
+        /// The largest number of cells a maze may hold.
+        limit: u64,
+    },
     /// Reading or writing a maze file failed, or its contents were malformed.
     Io(std::io::Error),
 }
@@ -29,6 +47,22 @@ impl fmt::Display for MazeError {
                 "unsupported algorithm '{name}'. Available algorithms: {}",
                 ALGORITHMS.join(", ")
             ),
+            MazeError::EmptySize { width, height } => write!(
+                f,
+                "a maze must have a positive width and height, got {width}x{height}"
+            ),
+            MazeError::TooLarge {
+                width,
+                height,
+                limit,
+            } => {
+                let cells = *width as u128 * *height as u128;
+                write!(
+                    f,
+                    "a {width}x{height} maze has {cells} cells, which is more than \
+                     the {limit} a maze may have"
+                )
+            }
             MazeError::Io(error) => write!(f, "{error}"),
         }
     }
@@ -39,6 +73,8 @@ impl std::error::Error for MazeError {
         match self {
             MazeError::Io(error) => Some(error),
             MazeError::UnsupportedAlgorithm { .. } => None,
+            MazeError::EmptySize { .. } => None,
+            MazeError::TooLarge { .. } => None,
         }
     }
 }

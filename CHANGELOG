@@ -15,6 +15,20 @@ Unreleased
                 than hashing coordinates, which is about nine times faster.
               * The `check` command counts dead ends directly instead of
                 building the list to take its length.
+            - Fixed
+              * `--width 0` and `--height 0` are rejected instead of printing
+                an empty maze and exiting 0, so a script can tell that no maze
+                was produced.
+              * A maze bigger than 25 million cells is refused before anything
+                is allocated, with the cell count and the limit in the message.
+                `--width 100000 --height 100000` used to run until memory ran
+                out; it now fails immediately.
+              * The banner, progress and summary lines go to stderr, so stdout
+                carries only the maze and the `check` verdicts and can be
+                redirected to a file.
+              * The library no longer prints. The progress line moved to the
+                command line tool, which leaves `Generator` silent for anyone
+                using it as a crate.
 v0.0.1 - 2026-11-18
             - First release.
             - Features

@@ -41,6 +41,19 @@ impl MazeOptions {
     }
 }
 
+/// The largest number of cells a [`Generator`] will build.
+///
+/// A maze is `width * height` cells, so the cost of a request grows with the
+/// *square* of the side length and nothing in the arguments stops someone
+/// asking for a million by a million. At 5000x5000 the slowest algorithm takes
+/// about 17 seconds and the grid alone is 25 MB; at 100000x100000 it is 10 GB
+/// of grid and would not finish. The limit turns that into an immediate,
+/// explained error instead of a hung process.
+///
+/// 25 million cells is 5000x5000, comfortably above anything a person prints,
+/// renders or saves to look at, and still only 25 MB of grid.
+pub const MAX_CELLS: u64 = 25_000_000;
+
 pub struct Generator {
     pub width: u64,
     pub height: u64,
@@ -59,12 +72,29 @@ impl Generator {
     /// Returns [`MazeError::UnsupportedAlgorithm`] when `algorithm` is not one
     /// of [`ALGORITHMS`], so a mistyped name is reported to the user instead of
     /// aborting the process.
+    ///
+    /// Rejects a zero dimension with [`MazeError::EmptySize`] and a maze larger
+    /// than [`MAX_CELLS`] with [`MazeError::TooLarge`]. Both used to be
+    /// accepted: `--width 0` reported a maze as generated and printed nothing,
+    /// and a huge size simply ran until it exhausted memory.
     pub fn new(
         width: u64,
         height: u64,
         algorithm: &str,
         seed: Option<u64>,
     ) -> Result<Self, MazeError> {
+        if width == 0 || height == 0 {
+            return Err(MazeError::EmptySize { width, height });
+        }
+        // Saturating so that width * height cannot overflow and slip a huge
+        // request past the limit.
+        if width.saturating_mul(height) > MAX_CELLS {
+            return Err(MazeError::TooLarge {
+                width,
+                height,
+                limit: MAX_CELLS,
+            });
+        }
         let alg: Box<dyn AlgorithmAbstraction> = match algorithm {
             "backtracking" => Box::new(BacktrackingAlgorithm::with_seed_or_random(seed)),
             "prim" => Box::new(PrimAlgorithm::with_seed_or_random(seed)),
@@ -102,18 +132,21 @@ impl Generator {
         self.algorithm.seed()
     }
 
+    /// Runs the algorithm and applies the requested variants.
+    ///
+    /// Kept for callers that already await; it is [`Generator::build`] under
+    /// the hood and has never needed a runtime. New callers should use
+    /// [`Generator::build`], which says so in its signature.
     pub async fn generate(&self) -> Result<Map, MazeError> {
-        println!(
-            "Generating a {}x{} maze using the '{}' algorithm (seed {})...",
-            self.width,
-            self.height,
-            self.algorithm.get_algorithm_type().as_string(),
-            self.seed()
-        );
         Ok(self.build())
     }
 
     /// Runs the algorithm and applies the requested variants.
+    ///
+    /// This is the entry point for callers that want the maze and nothing else.
+    /// It prints nothing: a library that writes to stdout corrupts the output
+    /// of whoever uses it, so progress reporting belongs to the command line
+    /// binary, which has [`Generator::seed`] and the sizes to report.
     ///
     /// Braiding draws its choices from the generator's seed, so a braided maze
     /// is just as reproducible as a plain one.
@@ -134,7 +167,8 @@ impl Generator {
 
 #[cfg(test)]
 mod tests {
-    use super::{ALGORITHMS, Generator};
+    use super::MazeError;
+    use super::{ALGORITHMS, Generator, MAX_CELLS};
 
     /// Every algorithm must return a perfect, solvable maze of the requested
     /// size, including the degenerate one-cell and single-row shapes.
@@ -250,6 +284,70 @@ mod tests {
                 "the message should list the valid choices: {message}"
             );
         }
+    }
+
+    /// A zero dimension used to be accepted: the tool printed "Generating a
+    /// 0x5 maze", printed an empty maze, and exited 0.
+    #[test]
+    fn a_zero_dimension_is_rejected() {
+        for (width, height) in [(0, 0), (0, 1), (1, 0), (0, 100), (100, 0)] {
+            let error = match Generator::new(width, height, "prim", Some(1)) {
+                Err(error) => error,
+                Ok(_) => panic!("{width}x{height} should not build a generator"),
+            };
+            assert!(
+                matches!(error, MazeError::EmptySize { .. }),
+                "{width}x{height} gave {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("positive width and height")
+                    && message.contains(&format!("got {width}x{height}")),
+                "the message should explain the rule and show the size: {message}"
+            );
+        }
+    }
+
+    /// A huge size used to run until memory ran out. 100000x100000 is 10 GB of
+    /// grid, so it has to be refused up front rather than discovered by the
+    /// person who ran it.
+    #[test]
+    fn an_absurd_size_is_rejected_before_any_work() {
+        for (width, height) in [
+            (100_000, 100_000),
+            (MAX_CELLS + 1, 1),
+            (1, MAX_CELLS + 1),
+            (u64::MAX, u64::MAX),
+            (1 << 40, 1 << 40),
+        ] {
+            let error = match Generator::new(width, height, "prim", Some(1)) {
+                Err(error) => error,
+                Ok(_) => panic!("{width}x{height} should not build a generator"),
+            };
+            assert!(
+                matches!(error, MazeError::TooLarge { .. }),
+                "{width}x{height} gave {error}"
+            );
+        }
+    }
+
+    /// The limit is a cell count, not a side length, and the multiplication
+    /// must not overflow a large-but-legal request into passing it.
+    #[test]
+    fn the_size_limit_counts_cells() {
+        // Exactly at the limit is allowed: 5000x5000 is 25 million cells.
+        assert_eq!(5000 * 5000, MAX_CELLS);
+        assert!(Generator::new(5000, 5000, "prim", Some(1)).is_ok());
+        // One cell over is not.
+        let error = match Generator::new(5000, 5001, "prim", Some(1)) {
+            Ok(_) => panic!("one cell over the limit should be refused"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, MazeError::TooLarge { .. }));
+        assert!(
+            error.to_string().contains("25005000"),
+            "the message should report the cell count: {error}"
+        );
     }
 
     #[test]

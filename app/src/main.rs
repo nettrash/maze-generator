@@ -97,6 +97,13 @@ impl OutputFormat {
     }
 }
 
+/// Where each message goes.
+///
+/// stdout carries the maze itself and the verdicts of `check`, so that
+/// `maze --command generate > maze.txt` writes a maze and nothing else.
+/// Everything else — the banner, progress, summaries — is commentary and is
+/// written to stderr with `eprintln!`, which is what makes that redirect
+/// usable.
 #[tokio::main]
 pub async fn main() -> ExitCode {
     let args = Args::parse();
@@ -119,17 +126,22 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
     match args.command.as_deref() {
         Some("generate") => {
             intro();
-            let generator = Generator::new(
-                args.width.unwrap_or(100),
-                args.height.unwrap_or(100),
-                args.algorithm.as_deref().unwrap_or("backtracking"),
-                args.seed,
-            )?;
+            let width = args.width.unwrap_or(100);
+            let height = args.height.unwrap_or(100);
+            let algorithm = args.algorithm.as_deref().unwrap_or("backtracking");
+            let generator = Generator::new(width, height, algorithm, args.seed)?;
+            // The library deliberately stays quiet, so the progress line lives
+            // here where the tool decides what stdout is for.
+            eprintln!(
+                "Generating a {width}x{height} maze using the '{algorithm}' algorithm \
+                 (seed {})...",
+                generator.seed()
+            );
             let generator = generator.with_options(MazeOptions {
                 braid: args.braid,
                 entrance_exit: args.entrance_exit,
             });
-            let map = generator.generate().await?;
+            let map = generator.build();
             match args.output.as_deref() {
                 Some(path) => {
                     let format = args
@@ -144,7 +156,7 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
                             map.save_svg_to_file(path)?;
                         }
                     }
-                    println!("Maze saved to {path} as {}", format.name());
+                    eprintln!("Maze saved to {path} as {}", format.name());
                 }
                 None => println!("{map}"),
             }
@@ -155,7 +167,7 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
                 return Err(input_error("the check command needs an --input file"));
             };
             let map = Map::load_from_file(path)?;
-            println!("Loaded a {}x{} maze from {path}", map.width(), map.height());
+            eprintln!("Loaded a {}x{} maze from {path}", map.width(), map.height());
             println!("Perfect: {}", map.is_perfect());
             println!("Solvable: {}", map.is_solvable());
             println!("Dead ends: {}", map.dead_end_count());
@@ -170,7 +182,7 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
                 return Err(input_error("the solve command needs an --input file"));
             };
             let map = Map::load_from_file(path)?;
-            println!("Loaded a {}x{} maze from {path}", map.width(), map.height());
+            eprintln!("Loaded a {}x{} maze from {path}", map.width(), map.height());
             let Some(route) = map.solve() else {
                 println!("{}", map.to_ascii());
                 println!("No solution: the exit cannot be reached from the entrance.");
@@ -195,7 +207,7 @@ async fn run(args: &Args) -> Result<(), maze::MazeError> {
                             fs::write(target, map.to_ascii_with_path(&route))?;
                         }
                     }
-                    println!("Solved maze saved to {target} as {}", format.name());
+                    eprintln!("Solved maze saved to {target} as {}", format.name());
                 }
                 None => println!("{}", map.to_ascii_with_path(&route)),
             }
@@ -232,16 +244,19 @@ fn input_error(message: impl Into<String>) -> maze::MazeError {
     ))
 }
 
+/// Prints the banner. Commentary, so it goes to stderr: a banner on stdout
+/// used to land in front of every maze, which made `maze --command generate >
+/// maze.txt` write a file that would not load back.
 fn intro() {
     let version = env!("CARGO_PKG_VERSION");
-    println!("maze v{version}");
+    eprintln!("maze v{version}");
     let year = chrono::Utc::now().year();
     let year_str = if year == 2026 {
         "2026".to_string()
     } else {
         format!("2026-{year}")
     };
-    println!("(c) {year_str} nettrash. All rights reserved.");
-    println!("This program is licensed under the MIT License.");
-    println!();
+    eprintln!("(c) {year_str} nettrash. All rights reserved.");
+    eprintln!("This program is licensed under the MIT License.");
+    eprintln!();
 }

@@ -67,6 +67,16 @@ for printing and sharing: walls are strokes on a white background, so the file
 stays sharp at any size, but it is a one-way export. `solve --output` draws the
 solution path as a green line under the walls.
 
+Only the maze itself and the verdicts of `check` go to stdout. The banner, the
+progress line and the "saved to" notes go to stderr, so redirecting stdout
+captures the maze without prose in front of it. What stdout carries is the
+rendering rather than the saved document, so use `--output` when you want a file
+`--input` can read back.
+
+A maze bigger than 25 million cells is refused, since the work grows with the
+square of the side length and a 100000x100000 request would never finish. The
+limit is 5000x5000; the error says how many cells were asked for.
+
 ## Maze variants
 
 By default every maze is *perfect*: the walls form a spanning tree, so there is
