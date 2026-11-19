@@ -21,15 +21,15 @@ Or download a prebuilt binary from the [releases page](https://github.com/nettra
 Windows. Each archive holds one `maze` executable:
 
 ```sh
-curl -LO https://github.com/nettrash/maze-generator/releases/download/v0.0.1/maze-0.0.1-aarch64-apple-darwin.tar.gz
-tar -xzf maze-0.0.1-aarch64-apple-darwin.tar.gz && ./maze --version
+curl -LO https://github.com/nettrash/maze-generator/releases/download/v0.0.2/maze-0.0.2-aarch64-apple-darwin.tar.gz
+tar -xzf maze-0.0.2-aarch64-apple-darwin.tar.gz && ./maze --version
 ```
 
 Or pull the published image, which is built for `linux/amd64` and
 `linux/arm64`:
 
 ```sh
-docker run --rm nettrash/maze:0.0.1 maze --command generate --width 20 --height 10
+docker run --rm nettrash/maze:0.0.2 maze --command generate --width 20 --height 10
 ```
 
 ## Usage
