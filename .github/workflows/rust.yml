@@ -2,23 +2,53 @@ name: Rust
 
 on:
   push:
-    branches: [ "*" ]
+    # A pull request branch is built by its pull_request run. Pushes are only
+    # for master and the version tags, so a PR commit no longer runs twice
+    # (`branches: ["*"]` also never matched a branch with a `/` in its name).
+    branches: [ master ]
     # Version tags publish a release, so they have to trigger the workflow too.
     tags: [ "v*" ]
   pull_request:
-    branches: [ "*" ]
   workflow_dispatch:  # Enable manual triggering
+    inputs:
+      tag:
+        description: >-
+          Backfill: an existing v* tag (for example v0.0.2) whose release
+          page and binaries to build again with this workflow. Leave empty for
+          an ordinary manual run, which builds and pushes the image of the
+          branch it runs on.
+        required: false
+        type: string
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
+  # actions/checkout runs a bare `git init`, which prints a "hint: Using
+  # 'master' as the name for the initial branch ... which will suppress this
+  # warning" block into every job log. Naming the initial branch is what the
+  # hint asks for; checkout then switches to the ref it fetched anyway.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: master
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
 
     steps:
-    - uses: actions/checkout@v4
-    
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+        # A backfill gates the tag it rebuilds; every other run checks out the
+        # commit that triggered it. refs/tags/ so that a branch of the same
+        # name can never be picked instead, and empty rather than github.ref
+        # because an explicit ref makes checkout fetch the ref's current tip
+        # instead of that exact commit.
+        ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || '' }}
+
     - name: Read the pinned toolchain
       # rust-toolchain.toml at the repository root is the single source of
       # truth: cargo picks the same version locally through rustup, and CI
@@ -27,67 +57,110 @@ jobs:
       id: pinned
       run: >-
         echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p'
-        "${{ github.workspace }}/rust-toolchain.toml")" >> "$GITHUB_OUTPUT"
+        ../rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+    - name: Check the toolchain pins agree
+      # The version is written down three times: rust-toolchain.toml, which
+      # this job builds with, `rust-version` in Cargo.toml and the Dockerfile's
+      # builder image. A bump that missed the Dockerfile used to pass here and
+      # only fail the image build on master. The Debian suffix is optional so
+      # that an old tag's `rust:1.100.0-slim` still passes a backfill.
+      env:
+        CHANNEL: ${{ steps.pinned.outputs.channel }}
+      run: |
+        rust_version=$(sed -nE 's/^rust-version *= *"([^"]*)".*/\1/p' Cargo.toml)
+        image=$(sed -nE 's/^FROM rust:([0-9][0-9.]*)-slim(-[a-z]+)? AS builder$/\1/p' ../Dockerfile)
+        echo "rust-toolchain.toml: '$CHANNEL', rust-version: '$rust_version', Dockerfile builder: '$image'"
+        if [ -z "$CHANNEL" ] || [ "$rust_version" != "$CHANNEL" ] || [ "$image" != "$CHANNEL" ]; then
+          echo "::error::The toolchain pins disagree: rust-toolchain.toml says '$CHANNEL', rust-version in app/Cargo.toml says '$rust_version' and the Dockerfile's FROM rust:<version>-slim-trixie AS builder says '$image'. Bump all three together."
+          exit 1
+        fi
+
+    - name: Check the tag is the crate version
+      # A tag on a tree whose Cargo.toml was not bumped would publish archives
+      # and an image named for the new version that print the old one. docker
+      # and the release jobs all need this job, so nothing is published.
+      if: github.ref_type == 'tag' || inputs.tag != ''
+      env:
+        TAG: ${{ inputs.tag || github.ref_name }}
+      run: |
+        version=$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+        if [ "v$version" != "$TAG" ]; then
+          echo "::error file=app/Cargo.toml::The tag is $TAG, but app/Cargo.toml says version '$version', so the tag would have to be v$version."
+          exit 1
+        fi
+        echo "Tag $TAG matches the crate version $version."
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
+      # Pinned to a commit rather than the moving master branch: the release
+      # jobs run this action with a token that can write releases.
+      uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
       with:
         toolchain: ${{ steps.pinned.outputs.channel }}
         components: rustfmt, clippy
 
     - name: Check format
-      run: 
-        cd ${{ github.workspace }}/app ;
-          cargo fmt -- --check
+      run: cargo fmt -- --check
     - name: Check clippy
       # -D warnings so a new lint fails the build here rather than quietly
       # waiting for the next toolchain bump to turn it into an error.
-      run: 
-        cd ${{ github.workspace }}/app ;
-          cargo clippy --all-targets --all-features -- -D warnings
+      # --locked, here and below, so a version bump that forgot the
+      # regenerated Cargo.lock fails the pull request, not the image and every
+      # release build after the merge.
+      run: cargo clippy --locked --all-targets --all-features -- -D warnings
     - name: Check documentation
       # The crate ships as a library as well as a tool, so a broken intra-doc
       # link or a doc example that stopped compiling is a build failure rather
       # than a warning nobody reads. Doc examples are compiled and run.
-      run: 
-        cd ${{ github.workspace }}/app ;
-          RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+      run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
     - name: Build
-      run: 
-        cd ${{ github.workspace }}/app ;
-        cargo build --verbose
+      run: cargo build --locked --verbose
     - name: Run tests
-      run: 
-        cd ${{ github.workspace }}/app ;
-        cargo test --verbose
+      run: cargo test --locked --verbose
 
   docker:
     needs: build
     runs-on: ubuntu-latest
-    # Run automatically on the master branch, on a version tag, or when
-    # manually triggered. The tag case is what publishes a release image.
+    # A pull request gets a build-only check: the amd64 image is built and
+    # run, and nothing logs in or pushes, so a Dockerfile or toolchain drift
+    # fails the PR rather than master. Master, a version tag and an ordinary
+    # manual run publish; the tag case is what publishes a release image. A
+    # backfill rebuilds release binaries only.
     if: >-
-      github.ref == 'refs/heads/master' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
-    
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && (
+        github.ref == 'refs/heads/master' ||
+        startsWith(github.ref, 'refs/tags/v'))) ||
+      (github.event_name == 'workflow_dispatch' && inputs.tag == '')
+    # Publishing runs take turns, so the master push and the tag pushed right
+    # after it never push at once, and the second reuses the first one's
+    # cache. GitHub keeps one pending job per group and cancels the one already
+    # waiting when another arrives, so pull requests get groups of their own
+    # and can never bump a waiting release. A third publish while one runs and
+    # one waits still does: re-run the cancelled job if that happens.
+    concurrency:
+      group: ${{ github.event_name == 'pull_request' && format('docker-{0}', github.ref) || 'docker-publish' }}
+      cancel-in-progress: false
+
     steps:
-    - uses: actions/checkout@v4
-    
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-    
+      uses: docker/setup-buildx-action@v4
+
     - name: Log in to Docker Hub
       if: github.event_name != 'pull_request'
-      uses: docker/login-action@v3
+      uses: docker/login-action@v4
       with:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
       continue-on-error: true
-    
+
     - name: Extract metadata
       id: meta
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@v6
       with:
         images: nettrash/maze
         tags: |
@@ -96,15 +169,17 @@ jobs:
           # {{branch}} is empty when the event is a tag, which used to expand
           # to the unpushable `nettrash/maze:-7ef7dc4` and make buildx reject
           # the whole invocation, so no image was pushed at all. Each line now
-          # prefixes the sha with whatever the run actually has.
-          type=sha,prefix={{branch}}-,enable=${{ github.ref_type == 'branch' }}
+          # prefixes the sha with whatever the run actually has. A pull
+          # request has neither, so it gets no sha tag; it pushes nothing.
+          type=sha,prefix={{branch}}-,enable=${{ github.ref_type == 'branch' && github.event_name != 'pull_request' }}
           type=sha,prefix={{tag}}-,enable=${{ github.ref_type == 'tag' }}
-          type=raw,value=latest,enable={{is_default_branch}}
+          # No raw `latest` for master: flavor latest=auto already adds it to
+          # a semver tag build, so only a release moves `latest`.
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
-    
+
     - name: Build Docker image for testing (single platform)
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@v7
       with:
         context: .
         platforms: linux/amd64
@@ -114,12 +189,13 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
         load: true
-    
+
     - name: Test Docker image locally
       run: |
         echo "Testing image: maze:test"
+        docker run --rm maze:test maze --version
         docker run --rm maze:test maze --help
-    
+
     - name: Build and push Docker image (multi-platform)
       # Push to registry if: not a PR AND (on master branch OR on a version tag
       # OR manually triggered)
@@ -129,7 +205,7 @@ jobs:
           startsWith(github.ref, 'refs/tags/v') ||
           github.event_name == 'workflow_dispatch'
         )
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@v7
       with:
         context: .
         platforms: linux/amd64,linux/arm64
@@ -143,36 +219,89 @@ jobs:
       # not reach the registry has to redden the run.
 
   # Prebuilt binaries, so a release is usable without a Rust toolchain or
-  # Docker. Only a version tag publishes them; every other run stops at build
-  # and test.
-  release:
+  # Docker. Only a version tag publishes them, or a backfill for a tag that
+  # already exists; every other run stops at build and test.
+  #
+  # The release is created here, once, before any binary is built. When every
+  # matrix job created it on its own, two jobs that both found no release would
+  # both create it, and the second failed on a release that already existed. A
+  # release made in the web UI before the tag run gets here is left exactly as
+  # it is, notes included.
+  release-page:
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+        ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || '' }}
+
+    - name: Create the release
+      # The notes are the tag's own CHANGELOG section: the lines under the
+      # heading that starts with "$TAG " (as in "v0.0.2 - 2026-11-19") up to
+      # the next version heading, without the heading, and with the 12-space
+      # indent taken off so "- Fixed" and "* ..." render as lists instead of
+      # one run-on paragraph. --verify-tag: this never creates a tag.
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        notes="$RUNNER_TEMP/notes.md"
+        awk 'index($0, ENVIRON["TAG"] " ") == 1 { found = 1; next }
+             found && /^v[0-9]/ { exit }
+             found { sub(/^            /, ""); print }' CHANGELOG > "$notes"
+        if ! grep -q '[^[:space:]]' "$notes"; then
+          echo "::error file=CHANGELOG::CHANGELOG has no section for $TAG, or it is empty. Add one under a heading that starts with '$TAG ', as in '$TAG - YYYY-MM-DD'."
+          exit 1
+        fi
+        if gh release view "$TAG" > /dev/null 2>&1; then
+          echo "Release $TAG already exists; its title and notes are left as they are."
+        else
+          gh release create "$TAG" --verify-tag --title "Maze $TAG" --notes-file "$notes"
+        fi
+
+  binaries:
+    name: binaries (${{ matrix.target }})
+    # Needs release-page, so it runs exactly when that job succeeded: on a
+    # release, once the release exists, and on no other run.
+    needs: release-page
     permissions:
       contents: write
 
     strategy:
-      # A cross target that breaks should not take the platforms that still
-      # build down with it, so each one is allowed to fail on its own.
+      # A target that breaks should not take the platforms that still build
+      # down with it, so each one is allowed to fail on its own.
       fail-fast: false
       matrix:
         include:
+          # Linux gets static musl binaries, which start on any distribution.
+          # A -gnu binary linked on the runner binds glibc 2.32 to 2.34
+          # symbols, so it did not start on Debian 11, Ubuntu 20.04 or RHEL 8.
+          # Both are built natively, so both are smoke tested.
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             binary: maze
             native: true
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
             binary: maze
-            native: false
-            # The cross target needs a C compiler for the other architecture to
-            # link against.
-            packages: gcc-aarch64-linux-gnu
-          - os: macos-14
+            native: true
+          # One arm64 image builds both Apple targets, because the SDK links
+          # x86_64 as well. The image does not list Rosetta, so the x86_64
+          # binary is not run.
+          - os: macos-26
             target: aarch64-apple-darwin
             binary: maze
             native: true
-          - os: macos-14
+          - os: macos-26
             target: x86_64-apple-darwin
             binary: maze
             native: false
@@ -182,80 +311,96 @@ jobs:
             native: true
 
     runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: app
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
+      with:
+        persist-credentials: false
+        ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || '' }}
 
     - name: Read the pinned toolchain
       # Same single source of truth as the build job.
       id: pinned
-      shell: bash
       run: >-
         echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)"/\1/p'
-        "${{ github.workspace }}/rust-toolchain.toml")" >> "$GITHUB_OUTPUT"
+        ../rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@master
+      uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
       with:
         toolchain: ${{ steps.pinned.outputs.channel }}
         targets: ${{ matrix.target }}
 
-    - name: Install the cross linker
-      if: ${{ matrix.packages }}
-      shell: bash
-      run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+    - name: Install the musl C toolchain
+      # Rust's -musl standard library brings its own musl C runtime, so pure
+      # Rust links without this. It gives a build script that compiles C for
+      # the target a musl-gcc to do it with.
+      if: contains(matrix.target, '-musl')
+      run: sudo apt-get update && sudo apt-get install -y musl-tools
 
     - name: Build
-      shell: bash
       run: |
-        cd "${{ github.workspace }}/app"
         # --locked keeps a published binary on the reviewed Cargo.lock.
         cargo build --release --locked --target "${{ matrix.target }}"
 
     - name: Smoke test the binary
-      # Only the targets the runner can actually execute.
-      if: ${{ matrix.native }}
-      shell: bash
+      # Only the targets the runner can actually execute. The version has to
+      # be exactly the tag's, so a binary from an unbumped tree is not
+      # published under the new number.
+      if: matrix.native
       run: |
-        cd "${{ github.workspace }}/app"
-        "./target/${{ matrix.target }}/release/${{ matrix.binary }}" --version
+        expected="maze ${TAG#v}"
+        actual=$("./target/${{ matrix.target }}/release/${{ matrix.binary }}" --version)
+        echo "$actual"
+        if [ "$actual" != "$expected" ]; then
+          echo "::error::${{ matrix.binary }} --version printed '$actual', expected '$expected'."
+          exit 1
+        fi
 
     - name: Package as a tarball
-      if: ${{ matrix.os != 'windows-latest' }}
-      shell: bash
+      # Owned by 0:0, so `sudo tar -x` hands the binary to root rather than to
+      # whichever local account has the runner's uid 1001. On macOS bsdtar
+      # would also add an AppleDouble `._maze` member and the xattrs, so those
+      # are left out. LICENSE travels next to the binary.
+      if: runner.os != 'Windows'
       run: |
-        cd "${{ github.workspace }}/app"
-        version="${GITHUB_REF_NAME#v}"
+        archive="dist/maze-${TAG#v}-${{ matrix.target }}.tar.gz"
         mkdir -p dist
-        tar -czf "dist/maze-$version-${{ matrix.target }}.tar.gz" \
-          -C "target/${{ matrix.target }}/release" maze
+        case "$(tar --version)" in
+          *"GNU tar"*)
+            tar --owner=0 --group=0 --numeric-owner -czf "$archive" \
+              -C "target/${{ matrix.target }}/release" maze \
+              -C "$GITHUB_WORKSPACE" LICENSE ;;
+          *)
+            COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname root --gname wheel \
+              --no-mac-metadata --no-xattrs -czf "$archive" \
+              -C "target/${{ matrix.target }}/release" maze \
+              -C "$GITHUB_WORKSPACE" LICENSE ;;
+        esac
+        tar -tvzf "$archive"
 
     - name: Package as a zip
-      if: ${{ matrix.os == 'windows-latest' }}
+      if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        Set-Location "${{ github.workspace }}/app"
-        $version = "${env:GITHUB_REF_NAME}".TrimStart('v')
+        $version = $env:TAG -replace '^v', ''
         New-Item -ItemType Directory -Force dist | Out-Null
-        Compress-Archive -Path "target/${{ matrix.target }}/release/maze.exe" `
-          -DestinationPath "dist/maze-$version-${{ matrix.target }}.zip" -Force
+        Compress-Archive -Force `
+          -Path "target/${{ matrix.target }}/release/maze.exe", "$env:GITHUB_WORKSPACE/LICENSE" `
+          -DestinationPath "dist/maze-$version-${{ matrix.target }}.zip"
 
     - name: Publish the release assets
-      # The runner ships gh, so publishing needs no third-party action.
-      # --clobber lets a re-run of the same tag replace its assets instead of
+      # The runner ships gh, so publishing needs no third-party action. The
+      # release-page job has created the release, so this only uploads.
+      # --clobber lets a re-run or a backfill replace the assets instead of
       # failing on the duplicate name.
       env:
         GH_TOKEN: ${{ github.token }}
-      shell: bash
-      run: |
-        cd "${{ github.workspace }}/app"
-        tag="${GITHUB_REF_NAME}"
-        notes="/tmp/maze-release-notes.md"
-        # The release page gets the newest CHANGELOG section: everything above
-        # the previous version heading.
-        awk '/^v[0-9]+\./{ if (++seen > 1) exit } { print }' \
-          "${{ github.workspace }}/CHANGELOG" > "$notes"
-        gh release view "$tag" >/dev/null 2>&1 ||
-          gh release create "$tag" --title "Maze $tag" --verify-tag \
-            --notes-file "$notes"
-        gh release upload "$tag" dist/* --clobber
+        GH_REPO: ${{ github.repository }}
+      run: gh release upload "$TAG" dist/* --clobber

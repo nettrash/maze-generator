@@ -1,0 +1,7 @@
+# The image copies app/ and LICENSE, so keep LICENSE in the context. A local
+# cargo build leaves gigabytes in app/target that the image would otherwise
+# upload and copy, only for cargo to ignore them because the fingerprints are
+# for another platform.
+**/target/
+.git
+.github
