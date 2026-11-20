@@ -21,6 +21,8 @@
 //! assert_eq!(route.first(), Some(&(0, 0)));
 //! ```
 
+#![warn(missing_docs)]
+
 pub mod algorithm;
 pub mod error;
 pub mod generator;
@@ -30,6 +32,6 @@ pub mod rng;
 pub use algorithm::abstraction::AlgorithmAbstraction;
 pub use algorithm::types::AlgorithmType;
 pub use error::MazeError;
-pub use generator::{ALGORITHMS, Generator, MazeOptions};
+pub use generator::{ALGORITHMS, Generator, MazeOptions, check_size};
 pub use map::{Direction, Map};
-pub use rng::{Rng, random_seed};
+pub use rng::{Rng, derive_seed, random_seed};

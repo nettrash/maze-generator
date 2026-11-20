@@ -16,6 +16,8 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use maze::{ALGORITHMS, Generator, Map, MazeOptions, Rng};
 use std::fs;
 use std::hint::black_box;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 /// Sizes a maze is expected to be generated at: a small one for a page, and a
 /// large one for printing.
@@ -47,6 +49,35 @@ fn generation(c: &mut Criterion) {
                 },
             );
         }
+    }
+    group.finish();
+}
+
+/// Shapes far from square, which is where cost that grows with one side
+/// rather than with the number of cells shows.
+///
+/// Eller used to be quadratic in both directions, so 10x80000 took 1.7 s
+/// where it now takes milliseconds; a regression there shows up here first.
+/// The random walks get a one-cell-wide corridor, which they carve without
+/// walking because a walk along it takes about the square of its length.
+fn shapes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("shapes");
+    group.sample_size(20);
+    let cases: [(&str, u64, u64); 4] = [
+        ("eller", 10, 100_000),
+        ("eller", 100_000, 10),
+        ("aldous_broder", 1, 1_000_000),
+        ("wilson", 1, 1_000_000),
+    ];
+    for (algorithm, width, height) in cases {
+        group.bench_with_input(
+            BenchmarkId::new(algorithm, format!("{width}x{height}")),
+            &(width, height),
+            |b, &(width, height)| {
+                let generator = generator(width, height, algorithm);
+                b.iter(|| black_box(generator.build()));
+            },
+        );
     }
     group.finish();
 }
@@ -155,8 +186,8 @@ fn map_operations(c: &mut Criterion) {
         });
     });
 
-    // The random-walk algorithms ask how many neighbours there are and then
-    // index one, which is the cheaper path and must stay that way.
+    // Counting neighbours looks at the position only, never at the walls,
+    // which is the cheaper path and must stay that way.
     group.bench_function("neighbor_count over every cell", |b| {
         b.iter(|| {
             let mut total = 0usize;
@@ -188,14 +219,52 @@ fn map_operations(c: &mut Criterion) {
     group.finish();
 }
 
+/// A directory of this benchmark run's own in the system temp directory,
+/// removed again when the guard is dropped.
+///
+/// The name carries the process id because a fixed one was shared by every
+/// run on the machine, so one run could delete the file another was timing.
+/// The removal lives in `Drop` so that it also happens when a benchmark
+/// panics on a failed save or load.
+struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("maze-bench-{name}-{}", std::process::id()));
+        // Process ids are reused, and a run killed before it could clean up
+        // leaves its directory behind under an id this one may now have.
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => panic!("could not clear the stale {}: {error}", path.display()),
+        }
+        fs::create_dir(&path).expect("could not create the benchmark directory");
+        ScratchDir { path }
+    }
+
+    /// The path of a file inside the directory.
+    fn join(&self, file: impl AsRef<Path>) -> PathBuf {
+        self.path.join(file)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        // Best effort: a second panic while one is already unwinding would
+        // abort the run and hide the first.
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 /// Saving and loading, which is the only path that touches the disk.
 ///
 /// The directory is made once and reused; each iteration overwrites the same
 /// file, so the measurement is the write itself rather than file creation.
 fn file_io(c: &mut Criterion) {
     let mut group = c.benchmark_group("file_io");
-    let dir = std::env::temp_dir().join("maze-bench-file-io");
-    fs::create_dir_all(&dir).expect("could not create the benchmark directory");
+    let dir = ScratchDir::new("file-io");
 
     let map = generator(100, 100, "prim").build();
     let path = dir.join("bench.maze");
@@ -205,9 +274,15 @@ fn file_io(c: &mut Criterion) {
         b.iter(|| black_box(map.save_to_file(&path)).expect("save failed"));
     });
 
+    // The load is unwrapped like the saves: a load that failed would
+    // otherwise be timed as if it had worked, and a missing file is a much
+    // faster path than parsing one.
     map.save_to_file(&path).expect("save failed");
     group.bench_function("load_from_file", |b| {
-        b.iter(|| black_box(Map::load_from_file(&path)).map(|map| map.width()));
+        b.iter(|| {
+            let map = black_box(Map::load_from_file(&path)).expect("load failed");
+            black_box(map.width())
+        });
     });
 
     group.bench_function("save_svg_to_file", |b| {
@@ -215,8 +290,6 @@ fn file_io(c: &mut Criterion) {
     });
 
     group.finish();
-
-    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Raw generator throughput, to separate the random number stream from the
@@ -247,5 +320,13 @@ fn rng(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, generation, variants, map_operations, file_io, rng);
+criterion_group!(
+    benches,
+    generation,
+    shapes,
+    variants,
+    map_operations,
+    file_io,
+    rng
+);
 criterion_main!(benches);

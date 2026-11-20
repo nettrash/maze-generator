@@ -52,7 +52,8 @@
 //! - [`Map::each_neighbor`] iterates all of them, which is what the graph walks
 //!   in [`Map::is_perfect`] and [`Map::solve`] do.
 //! - [`Map::neighbor_count`] with [`Map::neighbor_at`] picks one at random
-//!   without building anything, which is what the random-walk algorithms do.
+//!   without building anything. The random-walk algorithms take the same
+//!   pick from a lookup table of their own, which makes the same choice.
 //! - [`Map::neighbors`] hands back the packed array itself.
 //!
 //! All three agree, are allocation free, and count neighbours by position
@@ -72,10 +73,10 @@
 //! drawing for printing and sharing. It is a one-way export: only the text
 //! format described above is read back.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs;
-use std::io::{BufWriter, Error, ErrorKind, Write};
+use std::io::{self, BufWriter, Error, ErrorKind, Write};
 use std::path::Path;
 
 use crate::rng::Rng;
@@ -103,26 +104,46 @@ const FORMAT_VERSION: u32 = 2;
 /// Oldest file format version this crate can still read.
 const MIN_FORMAT_VERSION: u32 = 1;
 
+/// Marks a cell the solver has not reached in its table of entry sides.
+const UNVISITED: u8 = u8::MAX;
+/// Marks the cell the solver started from, which was not entered at all.
+const STARTED_HERE: u8 = Direction::ALL.len() as u8;
+
 /// Number of characters a single cell occupies when rendered as ASCII art.
 const CELL_WIDTH: usize = 3;
+/// A cell's top edge with its wall standing, up to the corner on its right.
+const EDGE_WALL: &str = "--+";
+/// A cell's top edge with its wall removed, up to the corner on its right.
+const EDGE_OPEN: &str = "  +";
+/// The inside of a cell with nothing drawn in it.
+const BLANK_INTERIOR: &str = "  ";
+const _: () = assert!(
+    EDGE_WALL.len() == CELL_WIDTH
+        && EDGE_OPEN.len() == CELL_WIDTH
+        && BLANK_INTERIOR.len() == CELL_WIDTH - 1
+);
 
 /// Size of one cell in SVG user units.
-const SVG_CELL: f64 = 20.0;
+const SVG_CELL: usize = 20;
 /// Colour of the maze walls in the SVG rendering.
 const SVG_WALL_COLOR: &str = "#000000";
 /// Stroke width of the maze walls.
-const SVG_WALL_WIDTH: f64 = 2.0;
+const SVG_WALL_WIDTH: usize = 2;
 /// Colour of a solution path drawn onto the SVG rendering.
 const SVG_PATH_COLOR: &str = "#1a7f37";
-/// Stroke width of a solution path, thinner than a wall so both stay visible.
-const SVG_PATH_WIDTH: f64 = 6.0;
+/// Stroke width of a solution path, wider than a wall so it reads at a glance.
+const SVG_PATH_WIDTH: usize = 6;
 
 /// One of the four sides of a cell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
+    /// Up, towards row 0.
     North,
+    /// Right, towards the last column.
     East,
+    /// Down, towards the last row.
     South,
+    /// Left, towards column 0.
     West,
 }
 
@@ -184,7 +205,16 @@ impl Map {
     /// Creates a new maze map with the specified width and height.
     ///
     /// Every cell starts with all four walls intact, which is what the
-    /// generation algorithms expect: they only ever knock walls down.
+    /// generation algorithms expect: they only ever knock walls down. A zero
+    /// dimension gives an empty map with no cells.
+    ///
+    /// Nothing here limits the size: [`crate::Generator::new`] is where a
+    /// request is checked against [`crate::generator::MAX_CELLS`].
+    ///
+    /// # Panics
+    ///
+    /// Panics, or aborts on a failed allocation, when the grid of
+    /// `width * height` bytes cannot be allocated.
     pub fn new(width: u64, height: u64) -> Self {
         let width = width as usize;
         let height = height as usize;
@@ -257,14 +287,20 @@ impl Map {
     }
 
     /// The neighbour of a cell in the given direction, or `None` when the
-    /// direction steps outside the maze.
+    /// cell is outside the maze or the direction steps out of it.
     pub fn neighbor(&self, x: usize, y: usize, direction: Direction) -> Option<(usize, usize)> {
-        let (dx, dy) = direction.offset();
-        let (nx, ny) = (x as i64 + dx, y as i64 + dy);
-        if self.in_bounds(nx, ny) {
-            Some((nx as usize, ny as usize))
-        } else {
-            None
+        // The cell itself is checked, not only where the step lands. A cell
+        // outside the maze used to get a neighbour inside it, and `carve`
+        // then wrote through an index that aliased another row:
+        // `carve(width, y, West)` opened two walls of the outer border.
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        match direction {
+            Direction::North => y.checked_sub(1).map(|ny| (x, ny)),
+            Direction::East => (x + 1 < self.width).then_some((x + 1, y)),
+            Direction::South => (y + 1 < self.height).then_some((x, y + 1)),
+            Direction::West => x.checked_sub(1).map(|nx| (nx, y)),
         }
     }
 
@@ -324,14 +360,40 @@ impl Map {
     /// The `index`th neighbour of a cell, as returned by [`Map::neighbors`].
     ///
     /// `index` must be below [`Map::neighbor_count`]; the entries are packed at
-    /// the front of the array, so this is the indexed form the random-walk
-    /// algorithms want.
+    /// the front of the array, so this is the indexed form a random pick
+    /// wants.
     ///
     /// # Panics
     ///
     /// Panics when `index` is not below [`Map::neighbor_count`].
     pub fn neighbor_at(&self, x: usize, y: usize, index: usize) -> (usize, usize, Direction) {
-        self.neighbors(x, y)[index].expect("index within neighbor_count")
+        // The same walk as `neighbors`, stopping at the entry asked for
+        // instead of filling the array.
+        if x < self.width && y < self.height {
+            let mut skip = index;
+            if y > 0 {
+                if skip == 0 {
+                    return (x, y - 1, Direction::North);
+                }
+                skip -= 1;
+            }
+            if x + 1 < self.width {
+                if skip == 0 {
+                    return (x + 1, y, Direction::East);
+                }
+                skip -= 1;
+            }
+            if y + 1 < self.height {
+                if skip == 0 {
+                    return (x, y + 1, Direction::South);
+                }
+                skip -= 1;
+            }
+            if x > 0 && skip == 0 {
+                return (x - 1, y, Direction::West);
+            }
+        }
+        panic!("index within neighbor_count")
     }
 
     /// Iterates over every neighbour of a cell together with the wall that
@@ -350,7 +412,8 @@ impl Map {
     }
 
     /// Removes the wall between a cell and its neighbour, returning whether the
-    /// wall could be removed at all (it cannot on the outer border).
+    /// wall could be removed at all: it cannot on the outer border, nor from a
+    /// cell outside the maze.
     ///
     /// The wall is shared, so the matching wall on the neighbour is removed too.
     pub fn carve(&mut self, x: usize, y: usize, direction: Direction) -> bool {
@@ -370,11 +433,7 @@ impl Map {
     /// outside. The opening is drawn by [`Map::to_ascii`] and survives a save
     /// and load round trip.
     pub fn open_border(&mut self, x: usize, y: usize, direction: Direction) -> bool {
-        if x >= self.width || y >= self.height {
-            return false;
-        }
-        let (dx, dy) = direction.offset();
-        if self.in_bounds(x as i64 + dx, y as i64 + dy) {
+        if !self.is_border(x, y, direction) {
             return false;
         }
         let had_wall = self.cell(x, y) & direction.wall_bit() != 0;
@@ -384,18 +443,20 @@ impl Map {
 
     /// Whether the outer border is open on the given side of a cell.
     pub fn is_border_open(&self, x: usize, y: usize, direction: Direction) -> bool {
-        let (dx, dy) = direction.offset();
-        if self.in_bounds(x as i64 + dx, y as i64 + dy) {
-            return false;
-        }
-        !self.has_wall(x, y, direction)
+        self.is_border(x, y, direction) && !self.has_wall(x, y, direction)
+    }
+
+    /// Whether the given side of a cell inside the maze is part of the outer
+    /// border.
+    fn is_border(&self, x: usize, y: usize, direction: Direction) -> bool {
+        x < self.width && y < self.height && self.neighbor(x, y, direction).is_none()
     }
 
     /// Opens the conventional entrance and exit: the west side of the top-left
     /// cell and the east side of the bottom-right cell.
     ///
-    /// Returns whether both openings were made, which fails only on an empty
-    /// maze.
+    /// Returns whether both openings were newly made: `false` for an empty
+    /// maze, and for one whose entrance or exit was already open.
     pub fn open_entrance_and_exit(&mut self) -> bool {
         if self.is_empty() {
             return false;
@@ -448,7 +509,8 @@ impl Map {
     ///
     /// Each dead end is joined to one of its walled neighbours, which adds a
     /// loop rather than removing a route, so the maze stays connected and every
-    /// cell stays reachable. Returns the number of walls removed.
+    /// cell stays reachable. A dead end that an earlier opening has already
+    /// joined is left alone. Returns the number of walls removed.
     ///
     /// Only interior walls are touched: opening the outer border belongs to
     /// [`Map::open_border`], not to braiding. A dead end whose remaining walls
@@ -456,21 +518,34 @@ impl Map {
     /// narrow mazes such as a 2x1 corridor. [`Map::dead_ends`] still lists
     /// those cells afterwards.
     pub fn braid(&mut self, rng: &mut Rng) -> usize {
+        // Which cells were dead ends before braiding started, one byte per
+        // cell in reading order: a list of their coordinates took sixteen.
+        let was_dead_end: Vec<bool> = (0..self.height)
+            .flat_map(|y| (0..self.width).map(move |x| (x, y)))
+            .map(|(x, y)| self.passage_count(x, y) == 1)
+            .collect();
         let mut removed = 0;
-        for (x, y) in self.dead_ends() {
-            // Collect the candidates first: carving changes the maze, so the
-            // list must not be built while it is being walked.
-            let candidates: Vec<Direction> = Direction::ALL
-                .iter()
-                .copied()
-                .filter(|direction| self.neighbor(x, y, *direction).is_some())
-                .filter(|direction| self.has_wall(x, y, *direction))
-                .collect();
-            if candidates.is_empty() {
+        for (index, _) in was_dead_end.iter().enumerate().filter(|(_, dead)| **dead) {
+            let (x, y) = (index % self.width, index / self.width);
+            // The dead end before this one may have opened into it, which
+            // leaves it two passages. Carving again would only add a loop no
+            // cul-de-sac needed: about a quarter of all braid openings used to
+            // be such extras.
+            if self.passage_count(x, y) != 1 {
                 continue;
             }
-            let direction = candidates[rng.below(candidates.len() as u64) as usize];
-            if self.carve(x, y, direction) {
+            let mut candidates = [Direction::North; 4];
+            let mut count = 0;
+            for direction in Direction::ALL {
+                if self.neighbor(x, y, direction).is_some() && self.has_wall(x, y, direction) {
+                    candidates[count] = direction;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+            if self.carve(x, y, candidates[rng.below_small(count)]) {
                 removed += 1;
             }
         }
@@ -565,13 +640,12 @@ impl Map {
         self.openings() == cells - 1 && self.reachable_count() == cells
     }
 
-    /// Renders the horizontal wall line above row `y`.
+    /// Appends the horizontal wall line above row `y` to `out`.
     ///
     /// Row `0` is the top border and row `height` the bottom border; both are
     /// solid except where [`Map::open_border`] made an opening.
-    fn horizontal_line(&self, y: usize) -> String {
-        let mut line = String::with_capacity(CELL_WIDTH * self.width + 1);
-        line.push('+');
+    fn push_horizontal_line(&self, out: &mut String, y: usize) {
+        out.push('+');
         for x in 0..self.width {
             let solid = match y {
                 0 => self.has_wall(x, 0, Direction::North),
@@ -580,43 +654,32 @@ impl Map {
             };
             // An opened border is drawn as a gap, and the cell below it is
             // where a path marker belongs.
-            let ch = if solid { '-' } else { ' ' };
-            for _ in 0..CELL_WIDTH - 1 {
-                line.push(ch);
-            }
-            line.push('+');
+            out.push_str(if solid { EDGE_WALL } else { EDGE_OPEN });
         }
-        line
     }
 
-    /// Renders the line of cell interiors for row `y`, including the vertical
-    /// walls between them.
+    /// Appends the line of cell interiors for row `y`, including the vertical
+    /// walls between them, to `out`.
     ///
     /// When `path` is given, the cells it covers are drawn with a marker
     /// instead of blanks.
-    fn vertical_line(&self, y: usize, path: Option<&PathMark>) -> String {
-        let mut line = String::with_capacity(CELL_WIDTH * self.width + 1);
-        line.push(if self.has_wall(0, y, Direction::West) {
+    fn push_vertical_line(&self, out: &mut String, y: usize, path: Option<&PathMark>) {
+        out.push(if self.has_wall(0, y, Direction::West) {
             '|'
         } else {
             ' '
         });
         for x in 0..self.width {
-            match path.and_then(|path| path.interior(x, y)) {
-                Some(interior) => line.push_str(&interior),
-                None => {
-                    for _ in 0..CELL_WIDTH - 1 {
-                        line.push(' ');
-                    }
-                }
-            }
-            line.push(if self.has_wall(x, y, Direction::East) {
+            out.push_str(
+                path.and_then(|path| path.interior(x, y))
+                    .unwrap_or(BLANK_INTERIOR),
+            );
+            out.push(if self.has_wall(x, y, Direction::East) {
                 '|'
             } else {
                 ' '
             });
         }
-        line
     }
 
     /// Renders the maze as ASCII art built from `+`, `-` and `|`.
@@ -633,14 +696,32 @@ impl Map {
         if path.is_empty() {
             return self.to_ascii();
         }
-        self.render(Some(&PathMark::new(path)))
+        self.render(Some(&PathMark::new(self, path)))
+    }
+
+    /// Writes [`Map::to_ascii`] to `out` as it is produced, rather than
+    /// building the whole rendering in memory first.
+    pub fn write_ascii<W: Write>(&self, mut out: W) -> io::Result<()> {
+        self.write_art(&mut out, None)
+    }
+
+    /// Writes [`Map::to_ascii_with_path`] to `out` as it is produced.
+    pub fn write_ascii_with_path<W: Write>(
+        &self,
+        mut out: W,
+        path: &[(usize, usize)],
+    ) -> io::Result<()> {
+        if path.is_empty() {
+            return self.write_art(&mut out, None);
+        }
+        self.write_art(&mut out, Some(&PathMark::new(self, path)))
     }
 
     /// Renders the maze as SVG.
     ///
-    /// Walls are drawn as strokes on a white background, one `<line>` per wall,
-    /// so the output is small and scales to any size without losing quality.
-    /// Returns an empty string for an empty maze.
+    /// Walls are strokes on a white background, merged into one `<path>` of
+    /// straight runs, so the output stays small and scales to any size
+    /// without losing quality. Returns an empty string for an empty maze.
     pub fn to_svg(&self) -> String {
         self.to_svg_with_path(&[])
     }
@@ -649,81 +730,187 @@ impl Map {
     ///
     /// The path becomes a single rounded polyline through the centres of the
     /// given cells, drawn before the walls so the walls stay readable on top of
-    /// it. An empty path renders the plain maze.
+    /// it. An empty path renders the plain maze. Cells outside the maze cannot
+    /// be drawn and are left out, as [`Map::to_ascii_with_path`] leaves them
+    /// out.
     pub fn to_svg_with_path(&self, path: &[(usize, usize)]) -> String {
+        let mut out = Vec::new();
+        self.write_svg(&mut out, path)
+            .expect("writing to a Vec cannot fail");
+        String::from_utf8(out).expect("the SVG is ASCII")
+    }
+
+    /// Writes [`Map::to_svg_with_path`] to `out` as it is produced, rather
+    /// than building the whole document in memory first.
+    ///
+    /// Writes nothing for an empty maze.
+    pub fn write_svg<W: Write>(&self, mut out: W, path: &[(usize, usize)]) -> io::Result<()> {
         if self.is_empty() {
-            return String::new();
+            return Ok(());
         }
 
-        let width = SVG_CELL * self.width as f64;
-        let height = SVG_CELL * self.height as f64;
-
-        let mut out = String::new();
-        out.push_str(&format!(
+        // Walls are stroked along the grid lines, so half of every outer
+        // stroke lies outside the grid. The drawing is padded by that much on
+        // every side, with the view box starting at minus the padding so the
+        // grid keeps its coordinates. Cropping at the grid used to clip the
+        // outer wall to half the thickness of the inner ones.
+        let pad = SVG_WALL_WIDTH / 2;
+        let width = SVG_CELL * self.width + 2 * pad;
+        let height = SVG_CELL * self.height + 2 * pad;
+        writeln!(
+            out,
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
-             viewBox=\"0 0 {width} {height}\">\n"
-        ));
-        out.push_str(&format!(
-            "<rect width=\"{width}\" height=\"{height}\" fill=\"#ffffff\"/>\n"
-        ));
+             viewBox=\"-{pad} -{pad} {width} {height}\">"
+        )?;
+        writeln!(
+            out,
+            "<rect x=\"-{pad}\" y=\"-{pad}\" width=\"{width}\" height=\"{height}\" fill=\"#ffffff\"/>"
+        )?;
 
-        if !path.is_empty() {
-            let points: Vec<String> = path
-                .iter()
-                .map(|(x, y)| {
-                    format!(
-                        "{},{}",
-                        (*x as f64 + 0.5) * SVG_CELL,
-                        (*y as f64 + 0.5) * SVG_CELL
-                    )
-                })
-                .collect();
-            out.push_str(&format!(
+        // Coordinates are computed in whole numbers, and a cell far outside
+        // the maze would overflow them.
+        let path: Vec<(usize, usize)> = path
+            .iter()
+            .copied()
+            .filter(|&(x, y)| x < self.width && y < self.height)
+            .collect();
+        if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
+            write!(
+                out,
                 "<polyline fill=\"none\" stroke=\"{SVG_PATH_COLOR}\" stroke-width=\"{SVG_PATH_WIDTH}\" \
-                 stroke-linecap=\"round\" stroke-linejoin=\"round\" points=\"{}\"/>\n",
-                points.join(" ")
-            ));
+                 stroke-linecap=\"round\" stroke-linejoin=\"round\" points=\""
+            )?;
+            let centre =
+                |(x, y): (usize, usize)| (x * SVG_CELL + SVG_CELL / 2, y * SVG_CELL + SVG_CELL / 2);
+            for (index, &cell) in path.iter().enumerate() {
+                let (x, y) = centre(cell);
+                let separator = if index == 0 { "" } else { " " };
+                write!(out, "{separator}{x},{y}")?;
+            }
+            // A lone point is a path no renderer strokes, so a route of one
+            // cell repeats it: a zero-length segment, which round caps draw
+            // as a dot.
+            if path.len() == 1 && first == last {
+                let (x, y) = centre(first);
+                write!(out, " {x},{y}")?;
+            }
+            out.write_all(b"\"/>\n")?;
         }
 
-        for y in 0..self.height {
-            for x in 0..self.width {
-                // Each wall is drawn from exactly one of its two cells: the
-                // north and west walls from the cell that owns them, and the
-                // east and south walls only from the border cells, so no wall
-                // is drawn twice.
-                if self.has_wall(x, y, Direction::North) {
-                    push_segment(&mut out, x, y, x + 1, y);
+        // Square caps carry each run half a stroke past its ends, which
+        // closes the corners where two walls meet; butt caps left a notch in
+        // every one of them.
+        write!(
+            out,
+            "<path fill=\"none\" stroke=\"{SVG_WALL_COLOR}\" stroke-width=\"{SVG_WALL_WIDTH}\" \
+             stroke-linecap=\"square\" d=\""
+        )?;
+        self.write_wall_runs(&mut out)?;
+        out.write_all(b"\"/>\n</svg>\n")
+    }
+
+    /// Writes the walls as the data of an SVG path made of straight runs: one
+    /// `M x y H x2` per stretch of wall along a horizontal grid line, then one
+    /// `M x y V y2` per stretch along a vertical one.
+    ///
+    /// Each wall is drawn exactly once and from the same side as before the
+    /// runs were merged: a horizontal wall belongs to the cell below it and a
+    /// vertical one to the cell on its right, except on the far border, where
+    /// there is no such cell. Merging is what keeps a large maze drawable:
+    /// one `<line>` element per wall made a 2000x2000 maze a 324 MB file.
+    fn write_wall_runs<W: Write>(&self, out: &mut W) -> io::Result<()> {
+        let mut separator = "";
+        for line in 0..=self.height {
+            let wall = |x: usize| {
+                if line < self.height {
+                    self.has_wall(x, line, Direction::North)
+                } else {
+                    self.has_wall(x, line - 1, Direction::South)
                 }
-                if self.has_wall(x, y, Direction::West) {
-                    push_segment(&mut out, x, y, x, y + 1);
+            };
+            let mut x = 0;
+            while x < self.width {
+                if !wall(x) {
+                    x += 1;
+                    continue;
                 }
-                if x + 1 == self.width && self.has_wall(x, y, Direction::East) {
-                    push_segment(&mut out, x + 1, y, x + 1, y + 1);
+                let start = x;
+                while x < self.width && wall(x) {
+                    x += 1;
                 }
-                if y + 1 == self.height && self.has_wall(x, y, Direction::South) {
-                    push_segment(&mut out, x, y + 1, x + 1, y + 1);
-                }
+                let (from, y, to) = (start * SVG_CELL, line * SVG_CELL, x * SVG_CELL);
+                write!(out, "{separator}M{from} {y}H{to}")?;
+                separator = " ";
             }
         }
 
-        out.push_str("</svg>\n");
-        out
+        for line in 0..=self.width {
+            let wall = |y: usize| {
+                if line < self.width {
+                    self.has_wall(line, y, Direction::West)
+                } else {
+                    self.has_wall(line - 1, y, Direction::East)
+                }
+            };
+            let mut y = 0;
+            while y < self.height {
+                if !wall(y) {
+                    y += 1;
+                    continue;
+                }
+                let start = y;
+                while y < self.height && wall(y) {
+                    y += 1;
+                }
+                let (x, from, to) = (line * SVG_CELL, start * SVG_CELL, y * SVG_CELL);
+                write!(out, "{separator}M{x} {from}V{to}")?;
+                separator = " ";
+            }
+        }
+        Ok(())
     }
 
     /// Shared implementation of the two renderings.
     fn render(&self, path: Option<&PathMark>) -> String {
+        let mut out = Vec::with_capacity(self.art_len());
+        self.write_art(&mut out, path)
+            .expect("writing to a Vec cannot fail");
+        String::from_utf8(out).expect("the rendering is ASCII")
+    }
+
+    /// The length of the rendering: `2 * height + 1` lines of
+    /// `3 * width + 1` characters, separated by newlines.
+    fn art_len(&self) -> usize {
         if self.is_empty() {
-            return String::new();
+            return 0;
         }
-        let mut out = String::new();
+        (2 * self.height + 1) * (CELL_WIDTH * self.width + 2) - 1
+    }
+
+    /// Writes the rendering to `out` one line at a time, without a trailing
+    /// newline.
+    ///
+    /// A 5000x5000 rendering is 150 MB, and the largest maze the generator
+    /// accepts one cell wide renders 250 MB.
+    /// Building each line as a `String` of its own and copying it into the
+    /// whole, then copying the whole again to put the file header in front,
+    /// cost that much again in time and memory; a save now holds one line.
+    fn write_art<W: Write>(&self, out: &mut W, path: Option<&PathMark>) -> io::Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        let mut line = String::with_capacity(2 * (CELL_WIDTH * self.width + 2));
         for y in 0..self.height {
-            out.push_str(&self.horizontal_line(y));
-            out.push('\n');
-            out.push_str(&self.vertical_line(y, path));
-            out.push('\n');
+            line.clear();
+            self.push_horizontal_line(&mut line, y);
+            line.push('\n');
+            self.push_vertical_line(&mut line, y, path);
+            line.push('\n');
+            out.write_all(line.as_bytes())?;
         }
-        out.push_str(&self.horizontal_line(self.height));
-        out
+        line.clear();
+        self.push_horizontal_line(&mut line, self.height);
+        out.write_all(line.as_bytes())
     }
 
     /// The unique path from the top-left corner to the bottom-right corner.
@@ -754,26 +941,25 @@ impl Map {
         start: (usize, usize),
         goal: (usize, usize),
     ) -> Option<Vec<(usize, usize)>> {
-        if !self.in_bounds(start.0 as i64, start.1 as i64)
-            || !self.in_bounds(goal.0 as i64, goal.1 as i64)
-        {
+        let inside = |(x, y): (usize, usize)| x < self.width && y < self.height;
+        if !inside(start) || !inside(goal) {
             return None;
         }
         if start == goal {
             return Some(vec![start]);
         }
 
-        // Each reached cell records the cell it was reached from, which is how
-        // the walk is rebuilt once the goal turns up. Indexed by cell rather
-        // than keyed by coordinate: the walk can visit every cell, and hashing
-        // a tuple per visit dominated the cost of this function.
+        // Each reached cell records the side it was entered through, which is
+        // how the walk is rebuilt once the goal turns up: one byte per cell,
+        // where a parent index took eight and 200 MB at the largest maze.
+        // Indexed by cell rather than keyed by coordinate, since hashing a
+        // tuple per visit dominated the cost of this function.
         let cells = self.width * self.height;
-        let unvisited = usize::MAX;
-        let mut came_from = vec![unvisited; cells];
+        let mut entered = vec![UNVISITED; cells];
         let mut queue = VecDeque::new();
         let start_index = start.1 * self.width + start.0;
         let goal_index = goal.1 * self.width + goal.0;
-        came_from[start_index] = start_index;
+        entered[start_index] = STARTED_HERE;
         queue.push_back(start_index);
 
         while let Some(index) = queue.pop_front() {
@@ -783,12 +969,12 @@ impl Map {
                     continue;
                 }
                 let next = ny * self.width + nx;
-                if came_from[next] != unvisited {
+                if entered[next] != UNVISITED {
                     continue;
                 }
-                came_from[next] = index;
+                entered[next] = direction as u8;
                 if next == goal_index {
-                    return Some(self.rebuild_path(&came_from, start_index, goal_index));
+                    return Some(self.rebuild_path(&entered, start, goal));
                 }
                 queue.push_back(next);
             }
@@ -796,25 +982,37 @@ impl Map {
         None
     }
 
-    /// Walks the `came_from` table backwards from `goal` to `start`.
+    /// Walks back from `goal` to `start` through the sides each cell was
+    /// entered by.
     fn rebuild_path(
         &self,
-        came_from: &[usize],
-        start_index: usize,
-        goal_index: usize,
+        entered: &[u8],
+        start: (usize, usize),
+        goal: (usize, usize),
     ) -> Vec<(usize, usize)> {
-        let mut path = vec![(goal_index % self.width, goal_index / self.width)];
-        let mut current = goal_index;
-        while current != start_index {
-            current = came_from[current];
-            path.push((current % self.width, current / self.width));
+        let mut path = vec![goal];
+        let mut current = goal;
+        while current != start {
+            let side = Direction::ALL[usize::from(entered[current.1 * self.width + current.0])];
+            current = self
+                .neighbor(current.0, current.1, side.opposite())
+                .expect("every cell on the walk was entered from inside the maze");
+            path.push(current);
         }
         path.reverse();
         path
     }
 
     /// Parses a maze from the text format written by [`Map::save_to_file`].
+    ///
+    /// Errors name the place they were found as an editor shows it: lines
+    /// count from 1 and include the two header lines, and columns count from
+    /// 1.
     pub fn from_ascii(text: &str) -> Result<Map, Error> {
+        // A byte order mark is how some Windows editors start a UTF-8 file.
+        // It is not whitespace, so it used to stick to the marker and fail
+        // the check that the file starts with 'maze'.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut lines = text.lines();
 
         let header = lines.next().ok_or_else(|| invalid("missing header line"))?;
@@ -857,40 +1055,92 @@ impl Map {
             return Err(invalid("too many values on the dimensions line"));
         }
 
-        let mut map = Map::with_open_grid(width, height);
-        let line_len = CELL_WIDTH * width + 1;
+        // A header promising more than the text can hold is refused before
+        // the grid is allocated. Trusting it let two short lines ask for an
+        // allocation of any size: `18446744073709551615 1` panicked on the
+        // capacity and `100000000 100000000` aborted the process when the
+        // allocation failed. The bound is the `height + 1` rows of walls,
+        // `3 * width + 1` characters each, of at least a byte each: they end
+        // in '+', so stripping trailing whitespace never shortens them, while
+        // the rows of cells may have lost spaces that are put back below.
+        // They take more bytes than the grid has cells, so the allocation is
+        // bounded by the input. The arithmetic is checked, since the header
+        // is free to claim sizes whose line lengths overflow.
+        let line_len = width.checked_mul(CELL_WIDTH).and_then(|n| n.checked_add(1));
+        let rows = height.checked_mul(2).and_then(|n| n.checked_add(1));
+        let needed = line_len
+            .zip(height.checked_add(1))
+            .and_then(|(len, wall_rows)| len.checked_mul(wall_rows));
+        let (Some(line_len), Some(rows)) = (line_len, rows) else {
+            return Err(invalid(format!(
+                "a {width}x{height} maze is too large to describe"
+            )));
+        };
+        if needed.is_none_or(|needed| needed > text.len()) {
+            return Err(invalid(format!(
+                "a {width}x{height} maze needs {} rows of walls of {line_len} characters, \
+                 more than the input holds",
+                height.saturating_add(1)
+            )));
+        }
 
-        for row in 0..(2 * height + 1) {
-            let raw = lines
-                .next()
-                .ok_or_else(|| invalid(format!("missing art line {row}")))?;
-            let chars: Vec<char> = raw.chars().collect();
+        let mut map = Map::with_open_grid(width, height);
+        let mut padded = String::new();
+
+        for row in 0..rows {
+            // The header and the dimensions are lines 1 and 2.
+            let line = row + 3;
+            let raw = lines.next().ok_or_else(|| {
+                invalid(format!(
+                    "line {line}: missing, a {width}x{height} maze has {rows} lines of art"
+                ))
+            })?;
+            if let Some((index, ch)) = raw.char_indices().find(|(_, ch)| !ch.is_ascii()) {
+                let column = raw[..index].chars().count() + 1;
+                return Err(invalid(format!(
+                    "line {line}, column {column}: unexpected character {ch:?}"
+                )));
+            }
+            // A row of cells can end in spaces: the blank inside of its last
+            // cell, and the gap of an exit in the east border. Editors and
+            // whitespace hooks strip those, and only spaces can have been
+            // there, so a short row of cells is padded back. A row of walls
+            // always ends in '+' and is never padded, which also means a file
+            // cut short cannot slip through: its last line is a row of walls.
+            let raw = if row % 2 == 1 && raw.len() < line_len {
+                padded.clear();
+                padded.push_str(raw);
+                padded.extend(std::iter::repeat_n(' ', line_len - raw.len()));
+                padded.as_str()
+            } else {
+                raw
+            };
+            let chars = raw.as_bytes();
             if chars.len() != line_len {
                 return Err(invalid(format!(
-                    "art line {row} has {} characters, expected {line_len}",
+                    "line {line} has {} characters, expected {line_len}",
                     chars.len()
                 )));
             }
+            let at = |index: usize| format!("line {line}, column {}", index + 1);
 
             if row % 2 == 0 {
                 let y = row / 2;
                 let border = y == 0 || y == height;
                 for x in 0..=width {
-                    if chars[CELL_WIDTH * x] != '+' {
-                        return Err(invalid(format!("art line {row}: '+' expected")));
+                    let index = CELL_WIDTH * x;
+                    if chars[index] != b'+' {
+                        return Err(invalid(format!("{}: '+' expected", at(index))));
                     }
                 }
                 for x in 0..width {
-                    let a = chars[CELL_WIDTH * x + 1];
-                    let b = chars[CELL_WIDTH * x + 2];
-                    if a != b || !matches!(a, '-' | ' ') {
-                        return Err(invalid(format!(
-                            "art line {row}: unexpected wall drawing at column {}",
-                            CELL_WIDTH * x + 1
-                        )));
+                    let index = CELL_WIDTH * x + 1;
+                    let (a, b) = (chars[index], chars[index + 1]);
+                    if a != b || !matches!(a, b'-' | b' ') {
+                        return Err(invalid(format!("{}: unexpected wall drawing", at(index))));
                     }
                     if border {
-                        if a == '-' {
+                        if a == b'-' {
                             if y == 0 {
                                 *map.cell_mut(x, 0) |= WALL_NORTH;
                             } else {
@@ -898,10 +1148,11 @@ impl Map {
                             }
                         } else if !border_may_be_open {
                             return Err(invalid(format!(
-                                "art line {row}: format version {version} requires a solid outer border"
+                                "{}: format version {version} requires a solid outer border",
+                                at(index)
                             )));
                         }
-                    } else if a == '-' {
+                    } else if a == b'-' {
                         *map.cell_mut(x, y - 1) |= WALL_SOUTH;
                         *map.cell_mut(x, y) |= WALL_NORTH;
                     }
@@ -910,36 +1161,44 @@ impl Map {
                 let y = row / 2;
                 for x in 0..width {
                     for offset in 1..CELL_WIDTH {
-                        if chars[CELL_WIDTH * x + offset] != ' ' {
+                        let index = CELL_WIDTH * x + offset;
+                        if chars[index] != b' ' {
                             return Err(invalid(format!(
-                                "art line {row}: cell interiors must be blank"
+                                "{}: cell interiors must be blank",
+                                at(index)
                             )));
                         }
                     }
                 }
                 for x in 0..=width {
-                    let ch = chars[CELL_WIDTH * x];
+                    let index = CELL_WIDTH * x;
+                    let ch = chars[index];
                     if x == 0 || x == width {
-                        if ch == '|' {
+                        if ch == b'|' {
                             if x == 0 {
                                 *map.cell_mut(0, y) |= WALL_WEST;
                             } else {
                                 *map.cell_mut(width - 1, y) |= WALL_EAST;
                             }
-                        } else if ch != ' ' {
+                        } else if ch != b' ' {
                             return Err(invalid(format!(
-                                "art line {row}: unexpected character '{ch}'"
+                                "{}: unexpected character {:?}",
+                                at(index),
+                                char::from(ch)
                             )));
                         } else if !border_may_be_open {
                             return Err(invalid(format!(
-                                "art line {row}: format version {version} requires a solid outer border"
+                                "{}: format version {version} requires a solid outer border",
+                                at(index)
                             )));
                         }
-                    } else if ch != '|' && ch != ' ' {
+                    } else if ch != b'|' && ch != b' ' {
                         return Err(invalid(format!(
-                            "art line {row}: unexpected character '{ch}'"
+                            "{}: unexpected character {:?}",
+                            at(index),
+                            char::from(ch)
                         )));
-                    } else if ch == '|' {
+                    } else if ch == b'|' {
                         *map.cell_mut(x - 1, y) |= WALL_EAST;
                         *map.cell_mut(x, y) |= WALL_WEST;
                     }
@@ -947,9 +1206,12 @@ impl Map {
             }
         }
 
-        for trailing in lines {
+        for (offset, trailing) in lines.enumerate() {
             if !trailing.trim().is_empty() {
-                return Err(invalid("unexpected content after the maze"));
+                return Err(invalid(format!(
+                    "line {}: unexpected content after the maze",
+                    rows + 3 + offset
+                )));
             }
         }
 
@@ -961,16 +1223,28 @@ impl Map {
     /// This is exactly what [`Map::save_to_file`] writes, and
     /// [`Map::from_ascii`] reads it back, so the two are inverses.
     pub fn to_text(&self) -> String {
-        format!(
-            "{MAGIC} {FORMAT_VERSION}\n{width} {height}\n{ascii}\n",
-            width = self.width,
-            height = self.height,
-            ascii = self.to_ascii()
-        )
+        let mut out = Vec::with_capacity(self.art_len() + 48);
+        self.write_text(&mut out)
+            .expect("writing to a Vec cannot fail");
+        String::from_utf8(out).expect("the text format is ASCII")
+    }
+
+    /// Writes [`Map::to_text`] to `out` as it is produced, rather than
+    /// building the whole document in memory first.
+    pub fn write_text<W: Write>(&self, mut out: W) -> io::Result<()> {
+        write!(
+            out,
+            "{MAGIC} {FORMAT_VERSION}\n{} {}\n",
+            self.width, self.height
+        )?;
+        self.write_art(&mut out, None)?;
+        out.write_all(b"\n")
     }
 
     /// Saves the maze to `path` in the text format described at the top of this
     /// module.
+    ///
+    /// An error names the path, as [`Map::load_from_file`]'s errors do.
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
         if self.is_empty() {
             return Err(Error::new(
@@ -978,12 +1252,7 @@ impl Map {
                 "cannot save an empty maze",
             ));
         }
-        let path = path.as_ref();
-        let file = fs::File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        writer.write_all(self.to_text().as_bytes())?;
-        writer.flush()?;
-        Ok(())
+        write_file(path.as_ref(), |out| self.write_text(out))
     }
 
     /// Loads a maze previously written by [`Map::save_to_file`].
@@ -1015,29 +1284,48 @@ impl Map {
                 "cannot save an empty maze",
             ));
         }
-        let path = path.as_ref();
-        let file = fs::File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        write!(writer, "{}", self.to_svg_with_path(route))?;
-        writer.flush()?;
-        Ok(())
+        write_file(path.as_ref(), |out| self.write_svg(out, route))
     }
+}
+
+/// Creates `path` and fills it through a buffer, naming the path in any
+/// error.
+///
+/// A failed write used to arrive as a bare 'No such file or directory', which
+/// for a command with an input file pointed at the wrong one.
+fn write_file(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<fs::File>) -> io::Result<()>,
+) -> Result<(), Error> {
+    let named = |e: Error| Error::new(e.kind(), format!("{}: {e}", path.display()));
+    let mut out = BufWriter::new(fs::File::create(path).map_err(named)?);
+    write(&mut out).and_then(|()| out.flush()).map_err(named)
 }
 
 /// Which cells of a maze a rendered path covers, and how to draw them.
 ///
-/// The path is stored as a set so rendering a row can ask about a cell without
-/// scanning the path again.
+/// The path is stored as a bitmap over the maze's cells, so rendering a row
+/// can ask about a cell without scanning the path again. Rendering asks about
+/// every cell, and hashing each of them into a set cost more than drawing the
+/// whole maze. Cells outside the maze cannot be drawn and are left out.
 struct PathMark {
-    cells: HashSet<(usize, usize)>,
+    on_path: Vec<bool>,
+    width: usize,
     start: (usize, usize),
     goal: (usize, usize),
 }
 
 impl PathMark {
-    fn new(path: &[(usize, usize)]) -> Self {
+    fn new(map: &Map, path: &[(usize, usize)]) -> Self {
+        let mut on_path = vec![false; map.width * map.height];
+        for &(x, y) in path {
+            if x < map.width && y < map.height {
+                on_path[y * map.width + x] = true;
+            }
+        }
         PathMark {
-            cells: path.iter().copied().collect(),
+            on_path,
+            width: map.width,
             start: path[0],
             goal: path[path.len() - 1],
         }
@@ -1048,14 +1336,14 @@ impl PathMark {
     ///
     /// Endpoints keep their letter and a leading space so they read as `S` and
     /// `E` rather than the doubled `SS` a repeated character would give.
-    fn interior(&self, x: usize, y: usize) -> Option<String> {
+    fn interior(&self, x: usize, y: usize) -> Option<&'static str> {
         let cell = (x, y);
         if cell == self.start {
-            Some("S ".to_string())
+            Some("S ")
         } else if cell == self.goal {
-            Some("E ".to_string())
-        } else if self.cells.contains(&cell) {
-            Some("..".to_string())
+            Some("E ")
+        } else if self.on_path[y * self.width + x] {
+            Some("..")
         } else {
             None
         }
@@ -1063,7 +1351,10 @@ impl PathMark {
 }
 
 impl Default for Map {
-    /// Provides a default maze map of size 100x100.
+    /// A 100x100 grid with every wall standing, as [`Map::new`] makes it.
+    ///
+    /// It is not a maze yet: carve it, or build one with
+    /// [`crate::Generator`].
     fn default() -> Self {
         Map::new(100, 100)
     }
@@ -1075,18 +1366,6 @@ impl fmt::Display for Map {
     }
 }
 
-/// Appends one wall to `out` as a `<line>` between two cell corners.
-fn push_segment(out: &mut String, x1: usize, y1: usize, x2: usize, y2: usize) {
-    out.push_str(&format!(
-        "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{SVG_WALL_COLOR}\" \
-         stroke-width=\"{SVG_WALL_WIDTH}\"/>\n",
-        x1 as f64 * SVG_CELL,
-        y1 as f64 * SVG_CELL,
-        x2 as f64 * SVG_CELL,
-        y2 as f64 * SVG_CELL,
-    ));
-}
-
 fn invalid(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::InvalidData, message.into())
 }
@@ -1094,6 +1373,7 @@ fn invalid(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     /// Builds a path for a throwaway file that is always removed again.
@@ -1217,6 +1497,42 @@ mod tests {
         assert!(map.carve(0, 0, Direction::East));
         assert!(!map.has_wall(0, 0, Direction::East));
         assert!(!map.has_wall(1, 0, Direction::West));
+    }
+
+    /// `neighbor` used to check only where the step landed, so a cell outside
+    /// the maze had a neighbour inside it and `carve` wrote through an index
+    /// that aliased another row.
+    #[test]
+    fn a_cell_outside_the_maze_has_no_neighbour_and_cannot_be_carved() {
+        let mut map = Map::new(5, 2);
+        let before = map.clone();
+        assert_eq!(map.neighbor(5, 0, Direction::West), None);
+        assert_eq!(map.neighbor(0, 2, Direction::North), None);
+        assert_eq!(map.neighbor(usize::MAX, 1, Direction::East), None);
+        assert_eq!(map.neighbor(1, usize::MAX, Direction::South), None);
+        // carve(5, 0, West) used to open the west border of (0, 1) and the
+        // east border of (4, 0) and report success.
+        assert!(!map.carve(5, 0, Direction::West));
+        assert!(!map.carve(usize::MAX, 1, Direction::East));
+        // These two used to panic on the index.
+        assert!(!map.carve(0, 2, Direction::North));
+        assert!(!map.carve(5, 1, Direction::West));
+        assert_eq!(map, before);
+        assert!(!map.is_border_open(usize::MAX, 0, Direction::East));
+        assert!(!map.open_border(5, 0, Direction::North));
+    }
+
+    #[test]
+    fn neighbors_of_inside_cells_are_unchanged() {
+        let map = Map::new(3, 2);
+        assert_eq!(map.neighbor(0, 0, Direction::North), None);
+        assert_eq!(map.neighbor(0, 0, Direction::West), None);
+        assert_eq!(map.neighbor(0, 0, Direction::East), Some((1, 0)));
+        assert_eq!(map.neighbor(0, 0, Direction::South), Some((0, 1)));
+        assert_eq!(map.neighbor(2, 1, Direction::East), None);
+        assert_eq!(map.neighbor(2, 1, Direction::South), None);
+        assert_eq!(map.neighbor(2, 1, Direction::North), Some((2, 0)));
+        assert_eq!(map.neighbor(2, 1, Direction::West), Some((1, 1)));
     }
 
     #[test]
@@ -1349,6 +1665,140 @@ mod tests {
         let err = Map::load_from_file(&path).unwrap_err();
         let _ = fs::remove_file(&path);
         assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+
+    /// The parser used to allocate whatever grid the header asked for before
+    /// reading a line of art, so two short lines could crash the tool:
+    /// `18446744073709551615 1` panicked on the capacity and
+    /// `100000000 100000000` aborted the process when the allocation failed.
+    #[test]
+    fn a_header_bigger_than_its_art_is_refused_before_allocating() {
+        for (dims, reason) in [
+            ("18446744073709551615 1", "too large to describe"),
+            ("1 18446744073709551615", "too large to describe"),
+            ("6148914691236517206 1", "too large to describe"),
+            ("1 9223372036854775808", "too large to describe"),
+            ("4294967296 4294967296", "more than the input holds"),
+            ("100000000 100000000", "more than the input holds"),
+            ("2 2", "more than the input holds"),
+        ] {
+            let error = Map::from_ascii(&format!("maze 2\n{dims}\n"))
+                .expect_err("a header without its art must be refused");
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "{dims}");
+            assert!(error.to_string().contains(reason), "{dims}: {error}");
+        }
+        // A truncated maze is still reported by the line that is missing.
+        let error = Map::from_ascii("maze 2\n2 1\n+--+--+\n|  |  |\n").unwrap_err();
+        assert!(error.to_string().starts_with("line 5: missing"), "{error}");
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_hide_the_marker() {
+        let text = perfect_maze(4).to_text();
+        let loaded = Map::from_ascii(&format!("\u{feff}{text}")).expect("a BOM is not content");
+        assert_eq!(loaded, perfect_maze(4));
+    }
+
+    /// The size check used to count every character of the art, so a maze
+    /// whose rows of cells had lost many spaces was refused as too short
+    /// before they could be put back: a 10x2 maze and any opened corridor.
+    #[test]
+    fn a_maze_that_lost_many_trailing_spaces_still_loads() {
+        let opened = crate::MazeOptions {
+            braid: false,
+            entrance_exit: true,
+        };
+        for (width, height, algorithm, seed) in [
+            (10, 2, "backtracking", 3),
+            (100, 1, "prim", 1),
+            (40, 3, "eller", 9),
+        ] {
+            let map = crate::Generator::new(width, height, algorithm, Some(seed))
+                .expect("known algorithm")
+                .with_options(opened)
+                .build();
+            let stripped: String = map
+                .to_text()
+                .lines()
+                .map(|line| format!("{}\n", line.trim_end()))
+                .collect();
+            assert_eq!(
+                Map::from_ascii(&stripped).expect("only spaces were lost"),
+                map,
+                "{algorithm} {width}x{height} seed {seed}"
+            );
+        }
+    }
+
+    /// Editors and whitespace hooks strip trailing spaces, which every row
+    /// with an exit in the east border ends in.
+    #[test]
+    fn a_maze_survives_its_trailing_spaces_being_stripped() {
+        let mut map = perfect_maze(4);
+        map.open_entrance_and_exit();
+        let text = map.to_text();
+        let stripped: String = text
+            .lines()
+            .map(|line| format!("{}\n", line.trim_end()))
+            .collect();
+        assert_ne!(
+            stripped, text,
+            "the fixture should have had trailing spaces"
+        );
+        assert_eq!(
+            Map::from_ascii(&stripped).expect("only spaces were lost"),
+            map
+        );
+        // A row of walls is never padded, so a file cut short still fails.
+        let cut = &text[..text.trim_end().len() - 1];
+        assert!(Map::from_ascii(cut).is_err());
+    }
+
+    #[test]
+    fn parse_errors_give_the_line_and_column_an_editor_shows() {
+        let text = Map::new(2, 1).to_text();
+        // Line 4 is the row of cells, `|  |  |`; column 5 is inside cell 2.
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        lines[3].replace_range(4..5, "x");
+        let error = Map::from_ascii(&lines.join("\n")).unwrap_err();
+        assert!(
+            error.to_string().starts_with("line 4, column 5: "),
+            "{error}"
+        );
+        let error = Map::from_ascii(&format!("{text}junk\n")).unwrap_err();
+        assert!(error.to_string().starts_with("line 6: "), "{error}");
+    }
+
+    #[test]
+    fn write_text_and_write_svg_stream_exactly_what_the_strings_hold() {
+        let map = perfect_maze(4);
+        let mut text = Vec::new();
+        map.write_text(&mut text).expect("writing to a Vec");
+        assert_eq!(String::from_utf8(text).expect("ASCII"), map.to_text());
+        let route = map.solve().expect("a perfect maze is solvable");
+        let mut svg = Vec::new();
+        map.write_svg(&mut svg, &route).expect("writing to a Vec");
+        assert_eq!(
+            String::from_utf8(svg).expect("ASCII"),
+            map.to_svg_with_path(&route)
+        );
+    }
+
+    /// Writes used to fail with a bare 'No such file or directory', which
+    /// for `solve` pointed at its input instead.
+    #[test]
+    fn a_failed_save_names_the_file() {
+        let map = perfect_maze(4);
+        // A directory unique to this run that is never created, so the test
+        // cannot be passed or failed by what an earlier run left behind.
+        let target = temp_path("missing-dir").join("out.maze");
+        for error in [
+            map.save_to_file(&target).unwrap_err(),
+            map.save_svg_to_file(&target).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), ErrorKind::NotFound);
+            assert!(error.to_string().contains("missing-dir"), "{error}");
+        }
     }
 
     #[test]
@@ -1486,6 +1936,41 @@ mod tests {
         };
         assert_eq!(braid(5), braid(5));
         assert_ne!(braid(5), braid(6));
+    }
+
+    /// A dead end that an earlier opening joined is no longer a dead end, and
+    /// braiding it again only adds a loop. In this maze (0, 0) opens into the
+    /// dead end (1, 0), which then used to open into (2, 0) as well.
+    #[test]
+    fn braiding_leaves_alone_a_dead_end_that_is_already_joined() {
+        // +--+--+--+--+
+        // |  |  |     |
+        // +  +  +  +  +
+        // |        |  |
+        // +--+--+--+--+
+        let mut map = Map::new(4, 2);
+        for (x, y, direction) in [
+            (0, 0, Direction::South),
+            (1, 0, Direction::South),
+            (2, 0, Direction::South),
+            (2, 0, Direction::East),
+            (0, 1, Direction::East),
+            (1, 1, Direction::East),
+            (3, 0, Direction::South),
+        ] {
+            assert!(map.carve(x, y, direction));
+        }
+        assert!(map.is_perfect());
+        assert_eq!(map.dead_ends(), vec![(0, 0), (1, 0), (3, 1)]);
+
+        let removed = map.braid(&mut Rng::new(1));
+        assert_eq!(removed, 2, "only two walls had to go");
+        assert!(!map.has_wall(0, 0, Direction::East));
+        assert!(
+            map.has_wall(1, 0, Direction::East),
+            "(1, 0) was already joined"
+        );
+        assert!(map.dead_ends().is_empty());
     }
 
     #[test]
@@ -1722,7 +2207,7 @@ mod tests {
     fn solved_routes_only_walk_through_openings() {
         for name in crate::ALGORITHMS {
             let generator = crate::Generator::new(14, 11, name, Some(3)).expect("known algorithm");
-            let map = generator.algorithm.generate_maze(14, 11);
+            let map = generator.algorithm().generate_maze(14, 11);
             let route = map.solve().expect("a perfect maze is solvable");
             assert_eq!(route.first(), Some(&(0, 0)), "{name} start");
             assert_eq!(route.last(), Some(&(13, 10)), "{name} goal");
@@ -1797,7 +2282,7 @@ mod tests {
     #[test]
     fn a_solved_route_never_visits_a_cell_twice() {
         let generator = crate::Generator::new(15, 12, "eller", Some(9)).expect("known algorithm");
-        let map = generator.algorithm.generate_maze(15, 12);
+        let map = generator.algorithm().generate_maze(15, 12);
         let route = map.solve().expect("a perfect maze is solvable");
         let unique: HashSet<(usize, usize)> = route.iter().copied().collect();
         assert_eq!(unique.len(), route.len(), "the route contains a cycle");
@@ -1823,31 +2308,72 @@ mod tests {
         assert_eq!(map.to_ascii_with_path(&[]), map.to_ascii());
     }
 
-    /// Counts the wall segments the SVG renderer is expected to draw.
+    /// The one-cell wall segments the SVG renderer is expected to draw, as
+    /// `(x1, y1, x2, y2)` in cell corners, sorted.
     ///
     /// A wall is drawn by exactly one owner: the cell to its south owns a
     /// horizontal wall, and the cell to its east owns a vertical one, except on
     /// the far border where there is no such cell.
-    fn expected_segment_count(map: &Map) -> usize {
+    fn expected_segments(map: &Map) -> Vec<(usize, usize, usize, usize)> {
         let (width, height) = (map.width() as usize, map.height() as usize);
-        let mut count = 0;
+        let mut segments = Vec::new();
         for y in 0..height {
             for x in 0..width {
                 if map.has_wall(x, y, Direction::North) {
-                    count += 1;
+                    segments.push((x, y, x + 1, y));
                 }
                 if map.has_wall(x, y, Direction::West) {
-                    count += 1;
+                    segments.push((x, y, x, y + 1));
                 }
                 if x + 1 == width && map.has_wall(x, y, Direction::East) {
-                    count += 1;
+                    segments.push((x + 1, y, x + 1, y + 1));
                 }
                 if y + 1 == height && map.has_wall(x, y, Direction::South) {
-                    count += 1;
+                    segments.push((x, y + 1, x + 1, y + 1));
                 }
             }
         }
-        count
+        segments.sort_unstable();
+        segments
+    }
+
+    /// The one-cell wall segments an SVG's wall path actually draws, decoded
+    /// from its `M x y H x2` and `M x y V y2` runs and sorted. Duplicates are
+    /// kept, so a wall drawn twice shows up as a mismatch.
+    fn drawn_segments(svg: &str) -> Vec<(usize, usize, usize, usize)> {
+        let data = svg
+            .split(" d=\"")
+            .nth(1)
+            .expect("a wall path")
+            .split('"')
+            .next()
+            .expect("a terminated path");
+        let corner = |value: &str| -> usize {
+            let units: usize = value.parse().expect("a whole-number coordinate");
+            assert_eq!(units % SVG_CELL, 0, "{units} is not on a grid line");
+            units / SVG_CELL
+        };
+        let mut segments = Vec::new();
+        for run in data.split('M').map(str::trim).filter(|run| !run.is_empty()) {
+            let (start, horizontal, end) = match run.split_once('H') {
+                Some((start, end)) => (start, true, end),
+                None => {
+                    let (start, end) = run.split_once('V').expect("an H or a V run");
+                    (start, false, end)
+                }
+            };
+            let (x, y) = start.split_once(' ').expect("an x y pair");
+            let (x, y, end) = (corner(x), corner(y), corner(end));
+            if horizontal {
+                assert!(end > x, "an empty or backwards run: {run}");
+                segments.extend((x..end).map(|x| (x, y, x + 1, y)));
+            } else {
+                assert!(end > y, "an empty or backwards run: {run}");
+                segments.extend((y..end).map(|y| (x, y, x, y + 1)));
+            }
+        }
+        segments.sort_unstable();
+        segments
     }
 
     /// Checks that every tag opened in `svg` is closed again, which is all the
@@ -1888,27 +2414,54 @@ mod tests {
     }
 
     #[test]
-    fn svg_draws_one_line_per_wall() {
+    fn svg_draws_every_wall_exactly_once() {
         let map = Map::new(3, 2);
         let svg = map.to_svg();
-        assert_eq!(svg.matches("<line ").count(), expected_segment_count(&map));
+        assert_eq!(drawn_segments(&svg), expected_segments(&map));
         // A fully walled 3x2 maze has every interior wall plus both borders.
-        assert_eq!(svg.matches("<line ").count(), 17);
+        assert_eq!(drawn_segments(&svg).len(), 17);
         assert_well_formed(&svg);
+
+        for name in crate::ALGORITHMS {
+            for braid in [false, true] {
+                let map = crate::Generator::new(13, 9, name, Some(5))
+                    .expect("known algorithm")
+                    .with_options(crate::MazeOptions {
+                        braid,
+                        entrance_exit: true,
+                    })
+                    .build();
+                assert_eq!(
+                    drawn_segments(&map.to_svg()),
+                    expected_segments(&map),
+                    "{name} (braid {braid}) drew a different set of walls"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn svg_draws_a_straight_wall_as_one_run() {
+        // A fully walled 5x1 maze: the top and bottom borders are one run
+        // each, and each of the six vertical walls is a run of its own.
+        let svg = Map::new(5, 1).to_svg();
+        assert!(svg.contains("M0 0H100"), "{svg}");
+        assert!(svg.contains("M0 20H100"), "{svg}");
+        assert_eq!(svg.matches('M').count(), 2 + 6, "{svg}");
     }
 
     #[test]
     fn removing_a_wall_removes_exactly_one_svg_segment() {
         let mut map = Map::new(4, 3);
-        let before = map.to_svg().matches("<line ").count();
+        let before = drawn_segments(&map.to_svg()).len();
         assert!(map.carve(1, 1, Direction::East));
-        let after = map.to_svg().matches("<line ").count();
+        let after = drawn_segments(&map.to_svg()).len();
         assert_eq!(after, before - 1, "a carved wall should disappear once");
 
         let mut map = Map::new(4, 3);
         assert!(map.carve(1, 1, Direction::South));
         assert_eq!(
-            map.to_svg().matches("<line ").count(),
+            drawn_segments(&map.to_svg()).len(),
             before - 1,
             "a carved horizontal wall should disappear once too"
         );
@@ -1916,12 +2469,43 @@ mod tests {
 
     #[test]
     fn svg_size_follows_the_maze_dimensions() {
+        // 5x3 cells of 20 units, plus half a wall of padding on every side.
         let svg = Map::new(5, 3).to_svg();
         assert!(
-            svg.contains("width=\"100\" height=\"60\""),
+            svg.contains("width=\"102\" height=\"62\""),
             "expected the document to be 5x3 cells wide: {svg}"
         );
-        assert!(svg.contains("viewBox=\"0 0 100 60\""));
+        assert!(svg.contains("viewBox=\"-1 -1 102 62\""), "{svg}");
+    }
+
+    /// The outer walls used to be centred on the edge of the view box, which
+    /// clipped half of every outer stroke away.
+    #[test]
+    fn svg_keeps_the_whole_outer_wall_in_view() {
+        let svg = Map::new(4, 3).to_svg();
+        let view_box: Vec<i64> = svg
+            .split("viewBox=\"")
+            .nth(1)
+            .expect("a view box")
+            .split('"')
+            .next()
+            .expect("a terminated view box")
+            .split(' ')
+            .map(|value| value.parse().expect("a number"))
+            .collect();
+        let half_wall = (SVG_WALL_WIDTH / 2) as i64;
+        let (grid_width, grid_height) = ((4 * SVG_CELL) as i64, (3 * SVG_CELL) as i64);
+        assert!(
+            view_box[0] <= -half_wall && view_box[1] <= -half_wall,
+            "{svg}"
+        );
+        assert!(view_box[0] + view_box[2] >= grid_width + half_wall, "{svg}");
+        assert!(
+            view_box[1] + view_box[3] >= grid_height + half_wall,
+            "{svg}"
+        );
+        // Square caps are what close the corners where two walls meet.
+        assert!(svg.contains("stroke-linecap=\"square\""), "{svg}");
     }
 
     #[test]
@@ -1951,6 +2535,26 @@ mod tests {
             "cell centres should be used: {points}"
         );
         assert_well_formed(&svg);
+    }
+
+    /// Route coordinates are whole numbers now, and a cell far outside the
+    /// maze overflowed them; such cells are left out, as the text rendering
+    /// leaves them out.
+    #[test]
+    fn route_cells_outside_the_maze_are_left_out_of_the_svg() {
+        let svg = Map::new(2, 2).to_svg_with_path(&[(0, 0), (1, 0), (usize::MAX / 10, 0)]);
+        assert!(svg.contains("points=\"10,10 30,10\""), "{svg}");
+    }
+
+    /// A polyline of one point is never stroked, so a one-cell route used to
+    /// vanish from the drawing while the text rendering showed its `S`.
+    #[test]
+    fn a_one_cell_route_is_drawn_as_a_dot() {
+        let map = Map::new(1, 1);
+        let route = map.solve().expect("a single cell is its own route");
+        let svg = map.to_svg_with_path(&route);
+        assert!(svg.contains("points=\"10,10 10,10\""), "{svg}");
+        assert!(svg.contains("stroke-linecap=\"round\""), "{svg}");
     }
 
     #[test]

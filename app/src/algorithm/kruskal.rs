@@ -1,30 +1,33 @@
+//! Randomised Kruskal's algorithm.
+
 use crate::{
-    algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
+    algorithm::{Index, abstraction::AlgorithmAbstraction, types::AlgorithmType},
     map::{Direction, Map},
     rng::{Rng, random_seed},
 };
 
 /// Union-find over cell indices, used by Kruskal's algorithm to tell whether
 /// two cells are already connected.
-struct DisjointSet {
-    parent: Vec<usize>,
+struct DisjointSet<I> {
+    parent: Vec<I>,
     rank: Vec<u8>,
 }
 
-impl DisjointSet {
+impl<I: Index> DisjointSet<I> {
     fn new(size: usize) -> Self {
         DisjointSet {
-            parent: (0..size).collect(),
+            parent: (0..size).map(I::from_usize).collect(),
             rank: vec![0; size],
         }
     }
 
-    fn find(&mut self, mut item: usize) -> usize {
-        while self.parent[item] != item {
+    fn find(&mut self, item: usize) -> usize {
+        let mut item = item;
+        while self.parent[item].to_usize() != item {
             // Path halving keeps the trees shallow without recursion.
-            let grandparent = self.parent[self.parent[item]];
+            let grandparent = self.parent[self.parent[item].to_usize()];
             self.parent[item] = grandparent;
-            item = grandparent;
+            item = grandparent.to_usize();
         }
         item
     }
@@ -36,10 +39,10 @@ impl DisjointSet {
             return false;
         }
         match self.rank[root_a].cmp(&self.rank[root_b]) {
-            std::cmp::Ordering::Less => self.parent[root_a] = root_b,
-            std::cmp::Ordering::Greater => self.parent[root_b] = root_a,
+            std::cmp::Ordering::Less => self.parent[root_a] = I::from_usize(root_b),
+            std::cmp::Ordering::Greater => self.parent[root_b] = I::from_usize(root_a),
             std::cmp::Ordering::Equal => {
-                self.parent[root_b] = root_a;
+                self.parent[root_b] = I::from_usize(root_a);
                 self.rank[root_a] += 1;
             }
         }
@@ -53,6 +56,7 @@ impl DisjointSet {
 /// random order whenever they join two regions that are not connected yet.
 /// Skipping walls that would close a loop leaves exactly a spanning tree, so
 /// the maze is perfect.
+#[derive(Debug, Clone)]
 pub struct KruskalAlgorithm {
     seed: u64,
 }
@@ -85,6 +89,8 @@ impl KruskalAlgorithm {
 }
 
 impl Default for KruskalAlgorithm {
+    /// The same as [`KruskalAlgorithm::new`]: every call picks a fresh random seed,
+    /// so two defaults draw different mazes.
     fn default() -> Self {
         Self::new()
     }
@@ -105,36 +111,54 @@ impl AlgorithmAbstraction for KruskalAlgorithm {
             return map;
         }
         let mut rng = self.rng();
-        let w = width as usize;
-        let h = height as usize;
-
-        // Each wall is stored once, from the cell that lies above or to the
-        // left of it, so no wall is considered twice.
-        let mut walls: Vec<(usize, usize, Direction)> = Vec::new();
-        for y in 0..h {
-            for x in 0..w {
-                if x + 1 < w {
-                    walls.push((x, y, Direction::East));
-                }
-                if y + 1 < h {
-                    walls.push((x, y, Direction::South));
-                }
-            }
-        }
-        rng.shuffle(&mut walls);
-
-        let mut sets = DisjointSet::new(w * h);
-        for (x, y, direction) in walls {
-            let (nx, ny) = match direction {
-                Direction::East => (x + 1, y),
-                Direction::South => (x, y + 1),
-                _ => continue,
-            };
-            if sets.union(y * w + x, ny * w + nx) {
-                map.carve(x, y, direction);
-            }
+        let (w, h) = (width as usize, height as usize);
+        // Wall numbers run up to twice the cell count, see `carve_walls`. The
+        // list of walls alone used to be 1.2 GB of `(usize, usize,
+        // Direction)` tuples at the largest size the generator accepts.
+        if u32::holds(2 * w * h) {
+            carve_walls::<u32>(&mut map, w, h, &mut rng);
+        } else {
+            carve_walls::<usize>(&mut map, w, h, &mut rng);
         }
         map
+    }
+}
+
+/// Removes the walls of a `w` by `h` maze in a random order, skipping each
+/// one that would close a loop.
+///
+/// Each wall is stored once, as `2 * cell + side` for the cell above or to the
+/// left of it, with `side` 0 for its east wall and 1 for its south wall, so no
+/// wall is considered twice and an entry is a single number. The list is
+/// built in reading order and shuffled exactly as the tuples it replaces were,
+/// so a seed draws the same maze it always has.
+fn carve_walls<I: Index>(map: &mut Map, w: usize, h: usize, rng: &mut Rng) {
+    let mut walls: Vec<I> = Vec::with_capacity(2 * w * h - w - h);
+    for y in 0..h {
+        for x in 0..w {
+            let cell = y * w + x;
+            if x + 1 < w {
+                walls.push(I::from_usize(2 * cell));
+            }
+            if y + 1 < h {
+                walls.push(I::from_usize(2 * cell + 1));
+            }
+        }
+    }
+    rng.shuffle(&mut walls);
+
+    let mut sets = DisjointSet::<I>::new(w * h);
+    for wall in walls {
+        let wall = wall.to_usize();
+        let cell = wall / 2;
+        let (direction, neighbor) = if wall % 2 == 0 {
+            (Direction::East, cell + 1)
+        } else {
+            (Direction::South, cell + w)
+        };
+        if sets.union(cell, neighbor) {
+            map.carve(cell % w, cell / w, direction);
+        }
     }
 }
 

@@ -1,5 +1,7 @@
+//! The recursive backtracker.
+
 use crate::{
-    algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
+    algorithm::{Index, abstraction::AlgorithmAbstraction, types::AlgorithmType},
     map::{Direction, Map},
     rng::{Rng, random_seed},
 };
@@ -9,6 +11,7 @@ use crate::{
 ///
 /// It visits every cell exactly once, so the walls it removes form a spanning
 /// tree and the result is always a perfect maze.
+#[derive(Debug, Clone)]
 pub struct BacktrackingAlgorithm {
     seed: u64,
 }
@@ -41,6 +44,8 @@ impl BacktrackingAlgorithm {
 }
 
 impl Default for BacktrackingAlgorithm {
+    /// The same as [`BacktrackingAlgorithm::new`]: every call picks a fresh random seed,
+    /// so two defaults draw different mazes.
     fn default() -> Self {
         Self::new()
     }
@@ -61,34 +66,49 @@ impl AlgorithmAbstraction for BacktrackingAlgorithm {
             return map;
         }
         let mut rng = self.rng();
-        let w = width as usize;
-        let cells = (width * height) as usize;
-        let mut stack = vec![(0usize, 0usize)];
-        let mut visited = vec![false; cells];
-        visited[0] = true;
-
-        while let Some((x, y)) = stack.last().copied() {
-            // At most four neighbours exist, so the unvisited ones fit in a
-            // fixed array; allocating a Vec here would run once per step.
-            let mut unvisited: [(usize, usize, Direction); 4] = [(0, 0, Direction::North); 4];
-            let mut count = 0;
-            for (nx, ny, direction) in map.each_neighbor(x, y) {
-                if !visited[ny * w + nx] {
-                    unvisited[count] = (nx, ny, direction);
-                    count += 1;
-                }
-            }
-
-            if count == 0 {
-                stack.pop();
-                continue;
-            }
-            let (nx, ny, direction) = unvisited[rng.below(count as u64) as usize];
-            map.carve(x, y, direction);
-            visited[ny * w + nx] = true;
-            stack.push((nx, ny));
+        let (w, h) = (width as usize, height as usize);
+        if u32::holds(w * h) {
+            walk::<u32>(&mut map, w, h, &mut rng);
+        } else {
+            walk::<usize>(&mut map, w, h, &mut rng);
         }
         map
+    }
+}
+
+/// The depth-first walk itself, with the path back to the start kept as a
+/// stack of flat cell numbers.
+///
+/// The stack can hold most of the maze at once, every cell of a long
+/// corridor, and a pair of `usize` coordinates per entry made it 400 MB on a
+/// 1x25000000 maze; a `u32` per entry is a quarter of that.
+fn walk<I: Index>(map: &mut Map, w: usize, h: usize, rng: &mut Rng) {
+    let mut stack: Vec<I> = vec![I::from_usize(0)];
+    let mut visited = vec![false; w * h];
+    visited[0] = true;
+
+    while let Some(&top) = stack.last() {
+        let index = top.to_usize();
+        let (x, y) = (index % w, index / w);
+        // At most four neighbours exist, so the unvisited ones fit in a
+        // fixed array; allocating a Vec here would run once per step.
+        let mut unvisited: [(usize, usize, Direction); 4] = [(0, 0, Direction::North); 4];
+        let mut count = 0;
+        for (nx, ny, direction) in map.each_neighbor(x, y) {
+            if !visited[ny * w + nx] {
+                unvisited[count] = (nx, ny, direction);
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            stack.pop();
+            continue;
+        }
+        let (nx, ny, direction) = unvisited[rng.below(count as u64) as usize];
+        map.carve(x, y, direction);
+        visited[ny * w + nx] = true;
+        stack.push(I::from_usize(ny * w + nx));
     }
 }
 

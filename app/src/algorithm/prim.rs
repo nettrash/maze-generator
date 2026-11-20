@@ -1,3 +1,5 @@
+//! Randomised Prim's algorithm.
+
 use crate::{
     algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
     map::{Direction, Map},
@@ -11,6 +13,7 @@ use crate::{
 /// reached cell are added to the frontier. Every carve connects a cell that was
 /// not in the maze before, so the removed walls form a spanning tree and the
 /// maze is perfect.
+#[derive(Debug, Clone)]
 pub struct PrimAlgorithm {
     seed: u64,
 }
@@ -43,6 +46,8 @@ impl PrimAlgorithm {
 }
 
 impl Default for PrimAlgorithm {
+    /// The same as [`PrimAlgorithm::new`]: every call picks a fresh random seed,
+    /// so two defaults draw different mazes.
     fn default() -> Self {
         Self::new()
     }
@@ -65,24 +70,24 @@ impl AlgorithmAbstraction for PrimAlgorithm {
         let mut rng = self.rng();
         let w = width as usize;
         let h = height as usize;
-        let mut in_maze = vec![vec![false; w]; h];
+        let mut in_maze = vec![false; w * h];
 
         // Frontier entries are the `(neighbour, direction)` triples returned by
         // `Map::neighbors`, so the wall to open is on the neighbour's side
         // facing back towards the maze.
         let mut frontier: Vec<(usize, usize, Direction)> = Vec::new();
         let start = (rng.below(width) as usize, rng.below(height) as usize);
-        in_maze[start.1][start.0] = true;
+        in_maze[start.1 * w + start.0] = true;
         frontier.extend(map.each_neighbor(start.0, start.1));
 
         while !frontier.is_empty() {
             let index = rng.below(frontier.len() as u64) as usize;
             let (nx, ny, direction) = frontier.swap_remove(index);
-            if in_maze[ny][nx] {
+            if in_maze[ny * w + nx] {
                 continue;
             }
             map.carve(nx, ny, direction.opposite());
-            in_maze[ny][nx] = true;
+            in_maze[ny * w + nx] = true;
             frontier.extend(map.each_neighbor(nx, ny));
         }
         map
