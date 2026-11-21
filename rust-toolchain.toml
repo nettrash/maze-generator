@@ -5,10 +5,13 @@
 # that differs between versions shows up on the first local build instead of
 # in a red CI run. rustup walks up from the current directory to find this
 # file, which is why it sits at the root and not in `app/`: the image build
-# copies `app/` on its own and should keep using the `rust:1.100.0-slim` base.
+# copies `app/` on its own and should keep using the `rust:1.100.0-slim-trixie`
+# base.
 #
-# Keep this in step with the base image in the Dockerfile. The workflow reads
-# the channel out of this file, so CI cannot drift from it.
+# Keep this in step with the base image in the Dockerfile and with
+# `rust-version` in `app/Cargo.toml`. The workflow reads the channel out of this
+# file, so CI cannot drift from it, and its build job fails when the three
+# disagree.
 [toolchain]
 channel = "1.100.0"
 components = ["rustfmt", "clippy", "rust-analyzer"]

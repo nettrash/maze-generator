@@ -1,3 +1,170 @@
+v0.0.3 - 2026-11-20
+            - Fixed
+              * A maze file whose header claims an absurd size is refused with
+                an error. The parser allocated the grid the header asked for
+                before reading any art, so two short lines piped into `check`
+                crashed the tool: `18446744073709551615 1` panicked (exit 101)
+                and `100000000 100000000` aborted the process (exit 134).
+                Nothing is allocated now until the input is long enough to
+                hold the maze it describes.
+              * Eller's algorithm no longer carves the last column into one
+                straight corridor down to the exit. It forced the last cell of
+                every set to open downwards, and the cell in the last column
+                is always the last of its set, so every Eller maze had that
+                shortcut and some mazes could never be drawn at all, such as
+                one of the four 2x2 mazes. A set that opens nothing by chance
+                now opens one of its cells chosen at random. Eller mazes for a
+                given seed differ from 0.0.2.
+              * Eller's algorithm takes time in proportion to the maze. Every
+                join relabelled the whole row and every row rebuilt a table
+                sized by every set ever made, so 10x80000 took 1.7 s,
+                5000x5000 took 16 s and 4.6 GB, a legal 10x2500000 maze most
+                of an hour and a 25000000x1 one about two days. 5000x5000
+                takes 0.4 s now.
+              * Aldous-Broder and Wilson refuse a maze longer than 20000 cells
+                on a side. Their random walks take about the square of the
+                longer side, so a legal 10x2500000 maze would have run for
+                about 44 hours. A single row or column, whose only perfect
+                maze is the straight corridor, is carved at once whatever its
+                length, and `--algorithm random` only picks an algorithm that
+                can build the shape.
+              * A reader that stops early no longer makes the tool panic:
+                `maze --command generate --width 300 --height 300 | head -1`
+                printed "failed printing to stdout: Broken pipe" and exited
+                101. A closed pipe now ends
+                the output quietly and the command exits on its own verdict,
+                and a real write error, such as a full disk, is reported.
+              * Bad usage exits with status 1, as the README promises. clap's
+                own errors, such as `--width abc`, an unknown flag or a bad
+                `--format`, exited 2.
+              * Options without `--command` are an error. `maze --input
+                m.maze --strict` printed the help and exited 0, so a check
+                whose `--command` had been left out passed every maze. A bare
+                `maze` still prints the help.
+              * An option the command does not read is refused rather than
+                ignored. `generate --input saved.maze --output saved.svg`
+                exported a brand-new random maze, and `check --output
+                report.txt` wrote nothing.
+              * `--format` without `--output` writes that format to stdout, as
+                `--output -` does. It was ignored, so `generate --format svg >
+                maze.svg` saved ASCII art.
+              * `solve` refuses an `--output` that is its own `--input`, by
+                any name or link. Solving in place replaced the maze with a
+                drawing the tool cannot read back, and reported success.
+              * `solve` on an unsolvable maze writes nothing to stdout when
+                `--output` names where the solution should go. Through
+                `--output -` it printed ASCII art where SVG was expected.
+              * `solve --output` reports the step count on stderr, which it
+                used to drop, and the marked-up maze it writes as text ends
+                with a newline, like every other document the tool writes.
+              * `--json` with `--output -` is refused before any work is done,
+                rather than after building the maze, and `solve` refuses it
+                for an unsolvable maze too instead of printing a report.
+              * `--input` reads at most 300 MB, more than the largest maze the
+                tool makes: `--input /dev/zero` grew to 17 GB in two seconds.
+              * `--algorithm random` picks from a stream of its own. The pick
+                was the same number the algorithm then drew first, so every
+                backtracking maze it chose started by carving east from the
+                entrance and every Eller maze it chose opened its first wall.
+                A seed may pick a different algorithm than it did in 0.0.2.
+              * Braiding draws from a stream of its own, as its comment always
+                said; the seed it derived was the algorithm's own stream one
+                draw on, so it repeated the algorithm's choices. It also
+                leaves alone a dead end an earlier opening has already joined,
+                where it used to open a second, needless loop: about a quarter
+                of all braid openings. Braided mazes for a given seed differ
+                from 0.0.2.
+              * Seeds picked at random are below 2^53, so a seed read back from
+                `--json` by a reader that stores numbers as doubles, as
+                JavaScript does, replays the same maze. A full 64-bit seed was
+                rounded on the way almost every time.
+              * `Map::carve` from a cell outside the maze returns false instead
+                of opening two walls of the outer border: `carve(width, y,
+                West)` wrote through an index that aliased the next row.
+              * The SVG export no longer clips the outer wall to half the
+                thickness of the others, and walls meet at closed corners: the
+                drawing is padded by half a wall and the walls have square
+                caps. A route of a single cell is drawn as a dot instead of
+                vanishing.
+              * `check --strict` says so when a maze is imperfect because part
+                of it is walled off, instead of blaming loops, and `check`
+                reports `Unreachable cells` when there are any.
+              * A failed write names the file it was for, and a parse error
+                gives the line and column an editor shows.
+              * A maze file loads with a UTF-8 byte order mark, and after its
+                trailing spaces have been stripped, which editors and
+                whitespace hooks do to every maze with an exit.
+              * The `--strict` help no longer says an opened maze fails it: an
+                entrance and an exit are holes in the border, not loops.
+              * The release builds the macOS binaries again. GitHub retired the
+                `macos-14` runners, so both macOS jobs failed and 0.0.2
+                shipped without them, while the README's install example
+                downloaded one.
+              * The release page is created once, before the binaries upload,
+                with the CHANGELOG section of the tag being released rendered
+                as lists. The binary jobs used to race to create it, and the
+                notes were the top section run together into one paragraph.
+              * The Linux binaries are static musl builds that run on any
+                distribution: the 0.0.2 ones needed glibc 2.34 and did not
+                start on Debian 11, Ubuntu 20.04 or RHEL 8. The Windows binary
+                no longer needs the Visual C++ runtime installed.
+              * Release archives store the binary owned by root rather than by
+                the build runner's uid 1001, which a root install handed to
+                whichever local account had that uid, and carry the licence.
+            - Features
+              * `solve --json` reports the `format` and `output` it wrote, and
+                `check --json` reports `unreachable_cells`.
+              * `Map::write_text`, `write_ascii`, `write_ascii_with_path` and
+                `write_svg` stream a maze to any writer. Saving and printing
+                use them, so they hold a line of the maze at a time instead of
+                the whole document, twice over for a saved file.
+              * `maze::check_size` tells whether an algorithm can build a size
+                without building anything.
+              * `AlgorithmType` has `ALL`, `as_str`, `Display` and `FromStr`
+                and derives the common traits. `Generator`, `Rng` and the
+                algorithms implement `Debug`, and `Generator` is `Send` and
+                `Sync`, so it can be handed to another thread.
+            - Performance
+              * The walls of an SVG are one path of straight runs instead of a
+                `<line>` per wall: a 2000x2000 maze is 34 MB instead of 324 MB
+                and is written in a third of the time.
+              * At 5000x5000 Kruskal's algorithm needs 336 MB instead of 1.5
+                GB, Wilson's 74 MB instead of 930 MB, backtracking 68 MB
+                instead of 403 MB and Prim's 54 MB instead of 342 MB, from
+                compact tables and from writing the maze out a line at a time.
+                They draw exactly the mazes they drew before.
+              * The random walks of Aldous-Broder and Wilson choose each step
+                from a table instead of branching on a random direction:
+                5000x5000 takes 13 s instead of 22 s for Aldous-Broder and
+                1.1 s instead of 2.1 s for Wilson, with the same mazes.
+              * Drawing a solution looks cells up in a bitmap instead of a hash
+                set, and the solver keeps one byte per cell instead of eight:
+                solving a 5000x5000 maze takes half the time and 241 MB
+                instead of 619 MB.
+              * `check` walks a perfect maze once instead of twice.
+            - Quality
+              * `tests/reproducibility.rs` pins 210 seeded mazes, so a
+                change that would quietly redraw the mazes people kept by seed
+                fails a test. The plain mazes of the five algorithms other than
+                Eller are byte for byte what 0.0.2 drew.
+              * Tests for each fix above. The parser fuzzing now reaches the
+                maze lines (its strings never held a newline), the integration
+                and command line tests work in directories of their own that
+                they remove again, so two test runs no longer break each
+                other, and a vacuous assertion on the solve output checks the
+                maze now.
+              * Every public item is documented, and `missing_docs` enforces it
+                through the clippy gate. `Generator`'s fields are private, so a
+                size it has checked cannot be changed afterwards.
+              * CI uses the Node 24 versions of its actions, builds and tests
+                with `--locked`, builds the image on pull requests, runs once
+                per commit instead of twice, checks the crate version against
+                the tag, and fails when the toolchain pins disagree. Only a
+                release moves the image's `latest` tag.
+              * The image builds and runs on the same Debian release, its user
+                is no longer created with a warning in a system group, it
+                carries the licence, and a local `docker build` no longer sends
+                `app/target` along.
 v0.0.2 - 2026-11-19
             - Fixed
               * A `v*` tag now publishes the versioned Docker image. On a tag

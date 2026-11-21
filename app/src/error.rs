@@ -35,6 +35,21 @@ pub enum MazeError {
         /// The largest number of cells a maze may hold.
         limit: u64,
     },
+    /// The algorithm walks the maze at random, which takes about the square
+    /// of the maze's longer side, and that side is past
+    /// [`crate::generator::MAX_WALK_SIDE`]. Far enough past it, the run would
+    /// take hours.
+    TooLong {
+        /// The algorithm the user asked for.
+        algorithm: String,
+        /// The width the user asked for.
+        width: u64,
+        /// The height the user asked for.
+        height: u64,
+        /// The longest side the algorithm takes, outside a single row or
+        /// column.
+        limit: u64,
+    },
     /// Reading or writing a maze file failed, or its contents were malformed.
     Io(std::io::Error),
 }
@@ -63,6 +78,19 @@ impl fmt::Display for MazeError {
                      the {limit} a maze may have"
                 )
             }
+            MazeError::TooLong {
+                algorithm,
+                width,
+                height,
+                limit,
+            } => write!(
+                f,
+                "'{algorithm}' walks the maze at random, and its running time grows with \
+                 the square of the longer side, so it builds mazes up to {limit} cells along \
+                 either side, or a single row or column of any length; a {width}x{height} maze \
+                 is past that. Another algorithm, such as 'backtracking', builds this shape \
+                 at once"
+            ),
             MazeError::Io(error) => write!(f, "{error}"),
         }
     }
@@ -75,6 +103,7 @@ impl std::error::Error for MazeError {
             MazeError::UnsupportedAlgorithm { .. } => None,
             MazeError::EmptySize { .. } => None,
             MazeError::TooLarge { .. } => None,
+            MazeError::TooLong { .. } => None,
         }
     }
 }

@@ -1,5 +1,9 @@
+//! Wilson's algorithm.
+
 use crate::{
-    algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
+    algorithm::{
+        abstraction::AlgorithmAbstraction, carve_corridor, random_step, types::AlgorithmType,
+    },
     map::{Direction, Map},
     rng::{Rng, random_seed},
 };
@@ -11,8 +15,10 @@ use crate::{
 /// cell already in the maze; the resulting simple path is then carved. This
 /// produces mazes that are uniformly distributed over all perfect mazes.
 ///
-/// Like Aldous-Broder it is slower than backtracking or Prim, so it is best
-/// suited to small and medium grids.
+/// Like Aldous-Broder, its running time grows with the square of the maze's
+/// longer side rather than with its number of cells; see
+/// [`crate::generator::MAX_WALK_SIDE`].
+#[derive(Debug, Clone)]
 pub struct WilsonAlgorithm {
     seed: u64,
 }
@@ -45,6 +51,8 @@ impl WilsonAlgorithm {
 }
 
 impl Default for WilsonAlgorithm {
+    /// The same as [`WilsonAlgorithm::new`]: every call picks a fresh random seed,
+    /// so two defaults draw different mazes.
     fn default() -> Self {
         Self::new()
     }
@@ -61,7 +69,7 @@ impl AlgorithmAbstraction for WilsonAlgorithm {
 
     fn generate_maze(&self, width: u64, height: u64) -> Map {
         let mut map = Map::new(width, height);
-        if map.is_empty() {
+        if map.is_empty() || carve_corridor(&mut map) {
             return map;
         }
         let mut rng = self.rng();
@@ -70,10 +78,14 @@ impl AlgorithmAbstraction for WilsonAlgorithm {
         let cells = w * h;
 
         let mut in_maze = vec![false; cells];
-        // The successor recorded during the current walk. Overwriting an entry
-        // when a cell is revisited is what erases the loop.
-        let mut successor: Vec<Option<(usize, usize, Direction)>> = vec![None; cells];
-        let mut touched: Vec<usize> = Vec::new();
+        // The side each cell was last left by during the current walk.
+        // Overwriting an entry when a cell is revisited is what erases the
+        // loop. Entries left behind by earlier walks are never read: the
+        // carving below starts at the walk's first cell and only ever follows
+        // exits this walk wrote, so nothing has to be cleared between walks.
+        // One byte per cell rather than the neighbour's coordinates, which
+        // took 24.
+        let mut exit = vec![Direction::North; cells];
 
         // Seed the maze with a single random cell.
         let start_index = rng.below(cells as u64) as usize;
@@ -86,28 +98,20 @@ impl AlgorithmAbstraction for WilsonAlgorithm {
 
             let mut current = (index % w, index / w);
             while !in_maze[current.1 * w + current.0] {
-                let count = map.neighbor_count(current.0, current.1);
-                let (nx, ny, direction) =
-                    map.neighbor_at(current.0, current.1, rng.below(count as u64) as usize);
-                let from = current.1 * w + current.0;
-                if successor[from].is_none() {
-                    touched.push(from);
-                }
-                successor[from] = Some((nx, ny, direction));
+                let (nx, ny, direction) = random_step(current.0, current.1, w, h, &mut rng);
+                exit[current.1 * w + current.0] = direction;
                 current = (nx, ny);
             }
 
             // Carve the loop-erased path from the start cell to the maze.
             let mut cell = (index % w, index / w);
-            in_maze[index] = true;
-            while let Some((nx, ny, direction)) = successor[cell.1 * w + cell.0].take() {
+            while !in_maze[cell.1 * w + cell.0] {
+                in_maze[cell.1 * w + cell.0] = true;
+                let direction = exit[cell.1 * w + cell.0];
                 map.carve(cell.0, cell.1, direction);
-                in_maze[ny * w + nx] = true;
-                cell = (nx, ny);
-            }
-
-            for stale in touched.drain(..) {
-                successor[stale] = None;
+                cell = map
+                    .neighbor(cell.0, cell.1, direction)
+                    .expect("the walk only ever stepped inside the maze");
             }
         }
         map

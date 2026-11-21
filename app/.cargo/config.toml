@@ -1,10 +1,14 @@
-# The release job cross builds `aarch64-unknown-linux-gnu` (see
-# `.github/workflows/rust.yml`), which links with the other architecture's C
-# compiler. It has to be named: left to the host `cc`, the driver pins
-# `rust-lld` to x86_64 emulation and the linker then refuses the AArch64-only
-# `--fix-cortex-a53-843419` flag rustc passes itself.
+# Link the C runtime into `maze.exe` statically. By default the MSVC target
+# links it dynamically, so the binary needs VCRUNTIME140.dll from the Visual
+# C++ Redistributable, which a clean Windows install, Windows Sandbox or a
+# Server Core container does not have. The Universal CRT the binary still
+# imports ships with Windows 10 and later. ripgrep does the same.
 #
-# This only applies to a build that asks for the target, so a plain
-# `cargo build --release` never looks for the cross compiler.
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
+# Linux needs nothing here: the release binaries are built for the `-musl`
+# targets, which link statically by default, and natively on each
+# architecture, so no cross linker has to be named. A stanza for the host's own
+# triple would also apply to a plain `cargo build`, which is how the old
+# `aarch64-unknown-linux-gnu` linker setting broke native builds on Fedora and
+# RHEL, where the compiler is not called `aarch64-linux-gnu-gcc`.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

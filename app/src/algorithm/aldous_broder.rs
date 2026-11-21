@@ -1,5 +1,9 @@
+//! The Aldous-Broder algorithm.
+
 use crate::{
-    algorithm::{abstraction::AlgorithmAbstraction, types::AlgorithmType},
+    algorithm::{
+        abstraction::AlgorithmAbstraction, carve_corridor, random_step, types::AlgorithmType,
+    },
     map::Map,
     rng::{Rng, random_seed},
 };
@@ -12,7 +16,10 @@ use crate::{
 /// perfect and is sampled uniformly at random.
 ///
 /// The random walk is slow to cover large grids, so this is best suited to
-/// small mazes.
+/// small mazes. Its running time grows with the square of the longer side, so
+/// [`crate::Generator`] refuses long thin shapes; see
+/// [`crate::generator::MAX_WALK_SIDE`].
+#[derive(Debug, Clone)]
 pub struct AldousBroderAlgorithm {
     seed: u64,
 }
@@ -45,6 +52,8 @@ impl AldousBroderAlgorithm {
 }
 
 impl Default for AldousBroderAlgorithm {
+    /// The same as [`AldousBroderAlgorithm::new`]: every call picks a fresh random seed,
+    /// so two defaults draw different mazes.
     fn default() -> Self {
         Self::new()
     }
@@ -61,7 +70,7 @@ impl AlgorithmAbstraction for AldousBroderAlgorithm {
 
     fn generate_maze(&self, width: u64, height: u64) -> Map {
         let mut map = Map::new(width, height);
-        if map.is_empty() {
+        if map.is_empty() || carve_corridor(&mut map) {
             return map;
         }
         let mut rng = self.rng();
@@ -74,9 +83,13 @@ impl AlgorithmAbstraction for AldousBroderAlgorithm {
         remaining -= 1;
 
         while remaining > 0 {
-            let count = map.neighbor_count(current.0, current.1);
-            let (nx, ny, direction) =
-                map.neighbor_at(current.0, current.1, rng.below(count as u64) as usize);
+            let (nx, ny, direction) = random_step(
+                current.0,
+                current.1,
+                width as usize,
+                height as usize,
+                &mut rng,
+            );
             let index = ny * width as usize + nx;
             if !visited[index] {
                 // Only the step that first reaches a cell opens a wall, which
